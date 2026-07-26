@@ -1831,6 +1831,155 @@ async def test_watch_events_reprimes_filters_and_streams() -> None:
     assert {"type": "pane.exited"} not in subs
 
 
+async def test_watch_events_reprime_yields_none_status_for_agentless_pane() -> None:
+    """Reprime must emit status=None when the subscribed pane has no agent."""
+    pane_get_no_agent = json.dumps(
+        {
+            "id": "cli:pane:get",
+            "result": {
+                "pane": {
+                    "cwd": "/Users/alexei/Workspace/ccgram",
+                    "focused": True,
+                    "pane_id": "w2:p1",
+                    "tab_id": "w2:t1",
+                    "workspace_id": "w2",
+                },
+                "type": "pane_info",
+            },
+        }
+    )
+    opener = _stream_of([])
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_SINGLE)
+        .on("pane", "get", out=pane_get_no_agent)
+    )
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [MuxEvent("agent_status", "w2:t1", "w2:p1", None)]
+
+
+async def test_watch_events_reprime_reads_subscribed_pane_not_refocused_one() -> None:
+    """After a focus flip, reprime must read the pane the stream subscribed."""
+    pane_list_before = json.dumps(
+        {
+            "result": {
+                "panes": [
+                    {
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "cwd": "/x",
+                        "focused": True,
+                        "pane_id": "w2:p1",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                    {
+                        "agent": "codex",
+                        "agent_status": "working",
+                        "cwd": "/x",
+                        "focused": False,
+                        "pane_id": "w2:p2",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                ],
+            },
+        }
+    )
+    # If reprime re-resolved the active pane (agent_status(window_id)), a second
+    # "pane list" call here would report the flipped focus — p2 with a
+    # different status — and the reprime event would wrongly carry it.
+    pane_list_after_flip = json.dumps(
+        {
+            "result": {
+                "panes": [
+                    {
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "cwd": "/x",
+                        "focused": False,
+                        "pane_id": "w2:p1",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                    {
+                        "agent": "codex",
+                        "agent_status": "working",
+                        "cwd": "/x",
+                        "focused": True,
+                        "pane_id": "w2:p2",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                ],
+            },
+        }
+    )
+    pane_get_p1 = json.dumps(
+        {
+            "result": {
+                "pane": {
+                    "agent": "claude",
+                    "agent_status": "idle",
+                    "pane_id": "w2:p1",
+                    "tab_id": "w2:t1",
+                },
+                "type": "pane_info",
+            },
+        }
+    )
+    pane_get_p2 = json.dumps(
+        {
+            "result": {
+                "pane": {
+                    "agent": "codex",
+                    "agent_status": "working",
+                    "pane_id": "w2:p2",
+                    "tab_id": "w2:t1",
+                },
+                "type": "pane_info",
+            },
+        }
+    )
+    calls: list[list[str]] = []
+    pane_list_calls = {"n": 0}
+
+    async def runner(args: Sequence[str]) -> tuple[int, str, str]:
+        args = list(args)
+        calls.append(args)
+        if args[:2] == ["pane", "list"]:
+            pane_list_calls["n"] += 1
+            out = (
+                pane_list_before if pane_list_calls["n"] == 1 else pane_list_after_flip
+            )
+            return 0, out, ""
+        if args[:3] == ["pane", "get", "w2:p1"]:
+            return 0, pane_get_p1, ""
+        if args[:3] == ["pane", "get", "w2:p2"]:
+            return 0, pane_get_p2, ""
+        return 1, "", "unexpected call"
+
+    opener = _stream_of([])
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=runner, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [
+        MuxEvent("agent_status", "w2:t1", "w2:p1", AgentStatus("idle", "claude", ""))
+    ]
+    pane_get_calls = [c for c in calls if c[:2] == ["pane", "get"]]
+    assert pane_get_calls == [["pane", "get", "w2:p1"]]
+
+
 async def test_watch_events_reconnects_after_stream_drops(monkeypatch) -> None:
     # Zero backoff so the reconnect is instant (no real sleep in the test).
     monkeypatch.setattr("ccgram.multiplexer.herdr._STREAM_BACKOFF_BASE", 0.0)

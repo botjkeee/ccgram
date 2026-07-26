@@ -112,7 +112,10 @@ class EventStreamMonitor:
                     logger.warning("event-stream dispatch failed: %s", exc)
 
     async def _dispatch(self, event: MuxEvent) -> None:
-        if event.kind == "agent_status" and event.status is not None:
+        if event.kind == "agent_status":
+            # None flows through as the negative marker, NOT an eviction —
+            # an evicted (cold) entry would re-fork the subprocess fallback
+            # every tick for agentless panes.
             agent_status_cache.set_status(event.window_id, event.status)
         elif event.kind == "window_died":
             agent_status_cache.clear(event.window_id)

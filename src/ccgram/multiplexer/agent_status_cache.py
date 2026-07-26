@@ -17,17 +17,31 @@ from __future__ import annotations
 
 from .base import AgentStatus
 
-_cache: dict[str, AgentStatus] = {}
+_cache: dict[str, AgentStatus | None] = {}
 
 
-def set_status(window_id: str, status: AgentStatus) -> None:
-    """Record the latest push-reported agent status for *window_id*."""
+def set_status(window_id: str, status: AgentStatus | None) -> None:
+    """Record the latest push-reported status; ``None`` = "known: no agent".
+
+    The negative marker is refreshed only by pushes on subscribed panes: an
+    agent started later in a pane that was NOT subscribed at connect time
+    keeps the marker until the next stream restart — acceptable, since the
+    stream restarts on every bound-set change.
+    """
     _cache[window_id] = status
 
 
 def get_status(window_id: str) -> AgentStatus | None:
-    """Return the cached push status for *window_id*, or None when cold."""
+    """Return the cached push status for *window_id*, or None when cold or negative."""
     return _cache.get(window_id)
+
+
+def lookup(window_id: str) -> tuple[bool, AgentStatus | None]:
+    """Return ``(warm, status)``: cold cache is ``(False, None)``; a warm
+    ``(True, None)`` means "no agent — do not fork a fallback lookup"."""
+    if window_id in _cache:
+        return True, _cache[window_id]
+    return False, None
 
 
 def clear(window_id: str) -> None:

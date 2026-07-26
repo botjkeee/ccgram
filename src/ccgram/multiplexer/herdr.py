@@ -1145,14 +1145,35 @@ class HerdrManager:
                         # isn't cold; events during reprime are buffered + read
                         # on the next iterations (no reprime-vs-subscribe race).
                         backoff = _STREAM_BACKOFF_BASE
+                        primed: set[str] = set()
                         for pane_id, window_id in pane_to_window.items():
-                            status = await self.agent_status(window_id)
-                            if status is not None:
+                            primed.add(window_id)
+                            pane = await self._pane_get(pane_id) or {}
+                            state = (pane.get("agent_status") or "").strip()
+                            # status=None is the negative marker: the agent left
+                            # while the stream was down; a stale cached "working"
+                            # must not outlive the reconnect.
+                            yield MuxEvent(
+                                kind="agent_status",
+                                window_id=window_id,
+                                pane_id=pane_id,
+                                status=AgentStatus(
+                                    state=state,
+                                    agent=(pane.get("agent") or "").strip(),
+                                    custom_status=(
+                                        pane.get("custom_status") or ""
+                                    ).strip(),
+                                )
+                                if state
+                                else None,
+                            )
+                        for window_id in ids:
+                            if window_id not in primed:
                                 yield MuxEvent(
                                     kind="agent_status",
                                     window_id=window_id,
-                                    pane_id=pane_id,
-                                    status=status,
+                                    pane_id="",
+                                    status=None,
                                 )
                         continue
                     event = translate_event(obj, pane_to_window)

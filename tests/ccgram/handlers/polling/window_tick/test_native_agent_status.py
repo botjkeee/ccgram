@@ -104,6 +104,28 @@ async def test_cache_hit_skips_subprocess() -> None:
     mux.agent_status.assert_not_awaited()
 
 
+def _herdr_like_mux() -> MagicMock:
+    """A native_agent_status mux double that counts ``agent_status`` calls."""
+    mux = MagicMock()
+    mux.capabilities = SimpleNamespace(native_agent_status=True)
+    mux.agent_status_calls = 0
+
+    async def _agent_status(window_id: str) -> AgentStatus | None:
+        mux.agent_status_calls += 1
+        return AgentStatus(state="working", agent="codex")
+
+    mux.agent_status = _agent_status
+    return mux
+
+
+async def test_known_no_agent_skips_subprocess_fallback() -> None:
+    agent_status_cache.set_status("w2:t1", None)  # negative marker
+    fake_mux = _herdr_like_mux()
+    with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", fake_mux):
+        assert await _native_agent_status("w2:t1") is None
+    assert fake_mux.agent_status_calls == 0  # no backend lookup on warm-none
+
+
 async def test_cold_cache_falls_back_to_subprocess() -> None:
     mux = _fake_mux(native=True, status=AgentStatus(state="working", agent="codex"))
     with patch("ccgram.handlers.polling.window_tick.observe.tmux_manager", mux):

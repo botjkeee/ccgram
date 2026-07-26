@@ -152,7 +152,9 @@ class MuxEvent:
     backend-neutral. ``kind``:
 
     - ``"agent_status"`` — the pane's native agent run-state changed; ``status``
-      carries the new ``AgentStatus``.
+      carries the new ``AgentStatus``. ``status=None`` means "no agent present
+      in the watched pane" (a negative marker, not "unknown") — reprime emits
+      it for a subscribed pane with no live agent.
     - ``"window_died"`` — the window's agent process exited or the window/tab
       closed (``pane.exited`` / ``tab.closed`` on herdr).
     """

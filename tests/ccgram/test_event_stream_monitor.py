@@ -18,6 +18,16 @@ async def test_dispatch_agent_status_updates_cache() -> None:
     assert agent_status_cache.get_status("w2:t1") == status
 
 
+async def test_dispatch_none_status_writes_negative_marker() -> None:
+    agent_status_cache.reset()
+    agent_status_cache.set_status(
+        "w2:t1", AgentStatus(state="working", agent="claude", custom_status="")
+    )
+    monitor = EventStreamMonitor(MagicMock(), lambda: {"w2:t1"})
+    await monitor._dispatch(MuxEvent("agent_status", "w2:t1", "w2:p1", None))
+    assert agent_status_cache.lookup("w2:t1") == (True, None)  # warm negative, NOT cold
+
+
 async def test_dispatch_window_died_clears_cache_and_notifies_bound_users() -> None:
     agent_status_cache.reset()
     agent_status_cache.set_status("w2:t1", AgentStatus("working"))
