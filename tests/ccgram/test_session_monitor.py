@@ -12,6 +12,7 @@ from ccgram.multiplexer.base import MultiplexerCapabilities, WindowRef
 from ccgram.providers.claude import ClaudeProvider
 from ccgram.providers.codex import CodexProvider
 from ccgram.session import SessionManager
+from ccgram.session_lifecycle import session_lifecycle
 from ccgram.session_monitor import NewWindowEvent, SessionMonitor
 from ccgram.thread_router import thread_router
 from ccgram.window_state_store import window_store
@@ -57,6 +58,56 @@ class TestMonitorLoop:
             await monitor._monitor_loop()
 
         mock_sync.prune_session_map.assert_not_called()
+
+    async def test_prune_uses_full_listing_discovery_excludes_internal(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """Internal windows count as live for prune but are excluded from discovery."""
+
+        async def _stop_after_cycle(_delay: float) -> None:
+            monitor._running = False
+
+        windows = [
+            WindowRef(window_id="w1:t1", window_name="app", cwd="/x"),
+            WindowRef(
+                window_id="w2:t1", window_name="fm-crew", cwd="/y", internal=True
+            ),
+        ]
+
+        with (
+            patch.object(monitor, "_cleanup_all_stale_sessions", AsyncMock()),
+            patch.object(
+                monitor, "_load_current_session_map", AsyncMock(return_value={})
+            ),
+            patch.object(
+                monitor, "_detect_and_cleanup_changes", AsyncMock(return_value={})
+            ) as mock_detect,
+            patch.object(
+                monitor, "_emit_unbound_window_events", AsyncMock()
+            ) as mock_emit_unbound,
+            patch.object(monitor, "_emit_known_unbound_window_events", AsyncMock()),
+            patch(
+                "ccgram.session_monitor.read_session_map_raw",
+                AsyncMock(return_value={}),
+            ),
+            patch("ccgram.session_map.session_map_sync") as mock_sync,
+            patch(
+                "ccgram.session_monitor.list_windows_for_reconciliation",
+                AsyncMock(return_value=windows),
+            ),
+            patch("ccgram.session_monitor.asyncio.sleep", _stop_after_cycle),
+        ):
+            mock_sync.load_session_map = AsyncMock()
+            monitor._running = True
+            await monitor._monitor_loop()
+
+        mock_sync.prune_session_map.assert_called_once_with({"w1:t1", "w2:t1"})
+
+        discovery_arg = mock_detect.call_args.kwargs["discovery_windows"]
+        assert {w.window_id for w in discovery_arg} == {"w1:t1"}
+
+        emitted_windows = mock_emit_unbound.call_args[0][0]
+        assert {w.window_id for w in emitted_windows} == {"w1:t1"}
 
 
 class TestPendingToolsCleanup:
@@ -165,6 +216,61 @@ class TestNewWindowDetection:
             await monitor._detect_and_cleanup_changes()
 
         cb.assert_called_once()
+
+
+class TestAdoptionDiscoveryGate:
+    """Hook-driven adoption must not fire for windows absent from discovery.
+
+    Prevents FirstMate-crewmate ``fm-*`` tabs (session_map entry written by
+    the hook, but internal so excluded from the discovery listing) from
+    creating a Telegram topic.
+    """
+
+    async def test_adoption_skips_windows_absent_from_discovery(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """A session_map entry for an internal (fm-*) tab must not create a topic."""
+        events: list = []
+
+        async def capture(event):
+            events.append(event)
+
+        monitor.set_new_window_callback(capture)
+        session_lifecycle.initialize({})
+        # NB: _load_current_session_map strips the "herdr:" prefix (parse_session_map),
+        # so current_map keys are BARE tab ids — the discovery gate compares them
+        # to WindowRef.window_id.
+        current = {
+            "w9:t1": {"session_id": "sid-1", "cwd": "/x", "window_name": ""},
+        }
+        monkeypatch.setattr(
+            monitor, "_load_current_session_map", AsyncMock(return_value=current)
+        )
+        # Window exists (hook wrote the entry) but is NOT in the discovery listing.
+        await monitor._detect_and_cleanup_changes(discovery_windows=[])
+        assert events == []
+
+    async def test_adoption_fires_for_discovered_windows(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """Same entry adopts normally when its window is discovery-eligible."""
+        events: list = []
+
+        async def capture(event):
+            events.append(event)
+
+        monitor.set_new_window_callback(capture)
+        session_lifecycle.initialize({})
+        current = {
+            "w9:t1": {"session_id": "sid-1", "cwd": "/x", "window_name": ""},
+        }
+        monkeypatch.setattr(
+            monitor, "_load_current_session_map", AsyncMock(return_value=current)
+        )
+        discovery_windows = [WindowRef(window_id="w9:t1", window_name="app", cwd="/x")]
+        await monitor._detect_and_cleanup_changes(discovery_windows=discovery_windows)
+        assert len(events) == 1
+        assert events[0].window_id == "w9:t1"
 
 
 _TMUX_CAPS = MultiplexerCapabilities(

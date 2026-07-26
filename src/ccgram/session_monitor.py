@@ -277,9 +277,20 @@ class SessionMonitor:
             self.state.save_if_dirty()
 
     async def _detect_and_cleanup_changes(
-        self, raw: dict | None = None
+        self,
+        raw: dict | None = None,
+        discovery_windows: list | None = None,
     ) -> dict[str, dict[str, str]]:
-        """Reconcile session_map; clean up replaced/removed sessions; fire new-window events."""
+        """Reconcile session_map; clean up replaced/removed sessions; fire new-window events.
+
+        ``discovery_windows`` (the non-internal live listing) gates hook-driven
+        adoption: a session_map entry whose window is not discovery-eligible —
+        internal ``fm-*``/``__*__`` labels, or not (yet) visible in the listing —
+        must not create a topic. ``None`` skips the gate (legacy callers);
+        ``[]`` blocks adoption for this cycle (listing unavailable). A window
+        skipped only because the listing lagged one cycle is retried by
+        ``_emit_known_unbound_window_events`` on the next poll.
+        """
         current_map = await self._load_current_session_map(raw)
         result = session_lifecycle.reconcile(current_map, self._idle_tracker)
 
@@ -297,6 +308,14 @@ class SessionMonitor:
         for window_id, details in result.changed_windows.items():
             if not thread_router.has_window(window_id):
                 adoption_windows[window_id] = details
+
+        if discovery_windows is not None:
+            discovery_ids = {w.window_id for w in discovery_windows}
+            adoption_windows = {
+                wid: details
+                for wid, details in adoption_windows.items()
+                if wid in discovery_ids
+            }
 
         if adoption_windows:
             # Lazy: session.py imports session_monitor at top; hoisting
@@ -427,22 +446,32 @@ class SessionMonitor:
                 raw_session_map = await read_session_map_raw()
                 await session_map_sync.load_session_map(raw_session_map)
 
-                current_map = await self._detect_and_cleanup_changes(raw_session_map)
-
                 all_windows = await list_windows_for_reconciliation(tmux_manager)
+                discovery_windows = (
+                    None
+                    if all_windows is None
+                    else [w for w in all_windows if not w.internal]
+                )
+                current_map = await self._detect_and_cleanup_changes(
+                    raw_session_map,
+                    discovery_windows=[] if all_windows is None else discovery_windows,
+                )
+
                 if all_windows is None:
                     logger.warning(
                         "Multiplexer listing unavailable; skipping window reconciliation"
                     )
                 else:
+                    assert discovery_windows is not None
                     live_window_ids = {w.window_id for w in all_windows}
                     session_map_sync.prune_session_map(live_window_ids)
                     known_window_ids = set(current_map.keys())
+                    discovery_ids = {w.window_id for w in discovery_windows}
                     await self._emit_unbound_window_events(
-                        all_windows, known_window_ids
+                        discovery_windows, known_window_ids
                     )
                     await self._emit_known_unbound_window_events(
-                        current_map, live_window_ids
+                        current_map, discovery_ids
                     )
 
                 new_messages = await self.check_for_updates(current_map)
