@@ -228,6 +228,8 @@ async def test_send_keys_vocabulary_accepted_live(herdr, tmp_path) -> None:
             "Enter",
             "Tab",
             "BSpace",
+            "Space",
+            "BTab",
             "Up",
             "Down",
             "Left",
