@@ -101,12 +101,37 @@ _HERDR_CAPABILITIES = MultiplexerCapabilities(
 # worth watching, its spawned crew is not.
 _INTERNAL_LABEL_RE = re.compile(r"^(__.*__|fm-.*)$")
 
-# The send-keys path uses tmux key vocabulary ("Up"/"BSpace"/…); map the few
-# that differ to herdr's kitty-style names. Unmapped tokens pass through.
+# The send-keys path uses tmux key vocabulary ("Up"/"C-c"/"M-Enter"/…); herdr
+# validates every key before writing bytes and expects kitty-style lowercase
+# names, so one untranslated token drops the whole call. Named keys map via
+# the table; ``C-``/``M-`` prefixes map to ``ctrl+``/``alt+``. Unknown tokens
+# (plain characters, already-native names) pass through.
 _KEY_ALIASES: Mapping[str, str] = {
-    "BSpace": "Backspace",
+    "BSpace": "backspace",
     "Space": "space",
+    "Escape": "esc",
+    "Enter": "enter",
+    "Tab": "tab",
+    "BTab": "shift+tab",
+    "Up": "up",
+    "Down": "down",
+    "Left": "left",
+    "Right": "right",
 }
+
+
+def _translate_key(token: str) -> str:
+    """Map one tmux key token to herdr's kitty-style name."""
+    if token in _KEY_ALIASES:
+        return _KEY_ALIASES[token]
+    rest = token[2:]
+    if rest and token[1] == "-" and token[0] in ("C", "M"):
+        mod = "ctrl" if token[0] == "C" else "alt"
+        return (
+            f"{mod}+{_KEY_ALIASES.get(rest, rest.lower() if len(rest) > 1 else rest)}"
+        )
+    return token
+
 
 # Runner contract: ``(returncode, stdout, stderr)``. Injectable for tests.
 HerdrRunner = Callable[[Sequence[str]], "Awaitable[tuple[int, str, str]]"]
@@ -711,9 +736,9 @@ class HerdrManager:
         self, pane_id: str, text: str, *, enter: bool, literal: bool
     ) -> bool:
         if not literal:
-            keys = [_KEY_ALIASES.get(tok, tok) for tok in text.split() if tok]
+            keys = [_translate_key(tok) for tok in text.split() if tok]
             if enter:
-                keys.append("Enter")
+                keys.append("enter")
             if not keys:
                 return False
             return await self._call_ok(["pane", "send-keys", pane_id, *keys])

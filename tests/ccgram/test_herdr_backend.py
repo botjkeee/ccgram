@@ -1526,7 +1526,7 @@ async def test_send_special_keys_uses_send_keys() -> None:
     assert (
         await _manager(fake).send("w2:t1", "Down", enter=False, literal=False) is True
     )
-    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "Down"]
+    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "down"]
 
 
 async def test_send_keys_appends_enter_when_requested() -> None:
@@ -1536,7 +1536,51 @@ async def test_send_keys_appends_enter_when_requested() -> None:
         .on("pane", "send-keys", out=OK)
     )
     await _manager(fake).send("w2:t1", "", enter=True, literal=False)
-    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "Enter"]
+    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "enter"]
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("C-c", "ctrl+c"),
+        ("C-d", "ctrl+d"),
+        ("C-z", "ctrl+z"),
+        ("C-y", "ctrl+y"),
+        ("M-Enter", "alt+enter"),
+        ("Escape", "esc"),
+        ("Enter", "enter"),
+        ("Tab", "tab"),
+        ("BSpace", "backspace"),
+        ("Space", "space"),
+        ("Up", "up"),
+        ("Down", "down"),
+        ("Left", "left"),
+        ("Right", "right"),
+        ("ctrl+c", "ctrl+c"),  # already-native names pass through
+        ("x", "x"),  # plain characters pass through
+    ],
+)
+async def test_send_keys_translates_tmux_tokens(token: str, expected: str) -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_FOR_FIND)
+        .on("pane", "send-keys", out="")
+    )
+    ok = await _manager(fake).send("w2:t1", token, enter=False, literal=False)
+    assert ok is True
+    call = fake.sent("pane", "send-keys")
+    assert call is not None and call[3:] == [expected]
+
+
+async def test_send_keys_appended_enter_is_translated() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_FOR_FIND)
+        .on("pane", "send-keys", out="")
+    )
+    await _manager(fake).send("w2:t1", "Down", enter=True, literal=False)
+    call = fake.sent("pane", "send-keys")
+    assert call is not None and call[3:] == ["down", "enter"]
 
 
 async def test_send_returns_false_when_tab_has_no_panes() -> None:
