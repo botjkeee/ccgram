@@ -92,3 +92,6 @@ pkg/mod/
 
 # Runtime uploads
 .ccgram-uploads/
+
+# Worktrees (harness-managed)
+.claude/worktrees/
