@@ -1765,3 +1765,70 @@ async def test_watch_events_reconnects_after_stream_drops(monkeypatch) -> None:
         ("agent_status", "done"),
     ]
     assert len(opener.seen) >= 2  # type: ignore[attr-defined]  # reconnected
+
+
+def _labelled_listing(tab_label: str, ws_label: str) -> FakeHerdr:
+    tab_list = json.dumps(
+        {
+            "result": {
+                "tabs": [
+                    {
+                        "label": "app",
+                        "tab_id": "w1:t1",
+                        "workspace_id": "w1",
+                        "cwd": "/a",
+                    },
+                    {
+                        "label": tab_label,
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                        "cwd": "/b",
+                    },
+                ],
+                "type": "tab_list",
+            }
+        }
+    )
+    ws_list = json.dumps(
+        {
+            "result": {
+                "workspaces": [
+                    {"workspace_id": "w1", "label": "myproject", "cwd": "/a"},
+                    {"workspace_id": "w2", "label": ws_label, "cwd": "/b"},
+                ],
+                "type": "workspace_list",
+            }
+        }
+    )
+    empty_panes = json.dumps({"result": {"panes": [], "type": "pane_list"}})
+    return (
+        FakeHerdr()
+        .on("tab", "list", out=tab_list)
+        .on("pane", "list", out=empty_panes)
+        .on("workspace", "list", out=ws_list)
+    )
+
+
+async def test_reconciliation_listing_includes_internal_tabs_marked() -> None:
+    # fm-* tab label: present in the reconciliation listing, marked internal.
+    fake = _labelled_listing(tab_label="fm-task-42", ws_label="crew")
+    refs = await _manager(fake).list_windows_for_reconciliation()
+    assert refs is not None
+    by_id = {r.window_id: r for r in refs}
+    assert "w2:t1" in by_id, "internal tab must stay visible to liveness consumers"
+    assert by_id["w2:t1"].internal is True
+    assert by_id["w1:t1"].internal is False
+
+
+async def test_reconciliation_listing_marks_internal_workspace_label() -> None:
+    fake = _labelled_listing(tab_label="agent", ws_label="fm-crew")
+    refs = await _manager(fake).list_windows_for_reconciliation()
+    assert refs is not None
+    assert {r.window_id: r.internal for r in refs} == {"w1:t1": False, "w2:t1": True}
+
+
+async def test_list_windows_still_filters_fm_tabs() -> None:
+    # Discovery surface keeps today's behavior: fm-*/__*__ never surface.
+    fake = _labelled_listing(tab_label="fm-task-42", ws_label="crew")
+    wins = await _manager(fake).list_windows()
+    assert {w.window_id for w in wins} == {"w1:t1"}

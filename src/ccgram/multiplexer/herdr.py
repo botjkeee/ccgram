@@ -337,6 +337,8 @@ class HerdrManager:
         window_name: str,
         cwd: str,
         agent: str,
+        *,
+        internal: bool = False,
     ) -> WindowRef:
         """Build a neutral ``WindowRef`` from resolved tab fields.
 
@@ -346,12 +348,14 @@ class HerdrManager:
         ``pane_current_command`` carries the representative agent label so
         provider detection and the status pipeline keep working.
         herdr has no tty and dimensions come from ``pane_dims`` on demand.
+        ``internal`` marks backend-internal ``__*__``/``fm-*`` tabs (Task 1).
         """
         return WindowRef(
             window_id=tab_id,
             window_name=window_name or agent,
             cwd=cwd,
             pane_current_command=agent,
+            internal=internal,
         )
 
     # ── Multiplexer Protocol surface ───────────────────────────────────
@@ -415,8 +419,14 @@ class HerdrManager:
         return "", cwd
 
     async def list_windows(self) -> list[WindowRef]:
-        """List windows, degrading an unavailable herdr server to an empty list."""
-        return await self.list_windows_for_reconciliation() or []
+        """List discovery-eligible windows (internal labels filtered).
+
+        Degrades an unavailable herdr server to an empty list — user-facing
+        best-effort surface. Destructive consumers must use
+        ``list_windows_for_reconciliation`` instead.
+        """
+        refs = await self.list_windows_for_reconciliation()
+        return [r for r in refs or [] if not r.internal]
 
     async def list_windows_for_reconciliation(self) -> list[WindowRef] | None:
         """List one ``WindowRef`` per herdr tab with its adaptive topic label.
@@ -427,7 +437,9 @@ class HerdrManager:
         pane's ``agent``, else first non-empty.
 
         Tabs whose workspace or tab label matches ``__*__`` (e.g. ``__main__``)
-        are skipped so ccgram never auto-adopts itself.
+        or ``fm-*`` are marked ``internal=True`` instead of being skipped: this
+        listing is the liveness truth for destructive prune, so internal tabs
+        must stay visible here. ``list_windows`` applies the discovery filter.
 
         This is the single source driving topic discovery and display-name
         re-sync: a workspace/tab rename re-labels the bound topic on the next
@@ -455,18 +467,25 @@ class HerdrManager:
             tab_label = tab.get("label", "")
             workspace_label = workspace_labels.get(tab.get("workspace_id", ""), "")
 
-            # Skip __*__ workspace or tab labels.
-            if _INTERNAL_LABEL_RE.match(workspace_label) or _INTERNAL_LABEL_RE.match(
-                tab_label
-            ):
-                continue
+            # Mark __*__ / fm-* workspace or tab labels as internal instead of
+            # skipping: this listing is the liveness truth for destructive
+            # prune, so internal tabs must stay visible here. ``list_windows``
+            # applies the actual discovery filter.
+            internal = bool(
+                _INTERNAL_LABEL_RE.match(workspace_label)
+                or _INTERNAL_LABEL_RE.match(tab_label)
+            )
 
             tab_panes = panes_by_tab.get(tab_id, [])
             rep_agent, rep_cwd = self._representative_pane(
                 tab_panes, tab.get("cwd", "")
             )
             window_name = format_agent_topic_prefix(workspace_label, tab_label)
-            refs.append(self._to_window_ref(tab_id, window_name, rep_cwd, rep_agent))
+            refs.append(
+                self._to_window_ref(
+                    tab_id, window_name, rep_cwd, rep_agent, internal=internal
+                )
+            )
         return refs
 
     async def find_window_by_id(self, window_id: str) -> WindowRef | None:
