@@ -212,10 +212,12 @@ class Config:
         self.send_max_results: int = _parse_int_env("CCGRAM_SEND_MAX_RESULTS", 50)
 
     def _init_lifecycle(self) -> None:
-        self.autoclose_done_minutes: int = int(
+        # Float so sub-minute values work: autoclose timers are checked on every
+        # poll tick (~1s), so "0.05" (3s) is a meaningful setting.
+        self.autoclose_done_minutes: float = float(
             os.getenv("AUTOCLOSE_DONE_MINUTES", "30")
         )
-        self.autoclose_dead_minutes: int = int(
+        self.autoclose_dead_minutes: float = float(
             os.getenv("AUTOCLOSE_DEAD_MINUTES", "10")
         )
         self.pane_lifecycle_notify: bool = os.getenv(
