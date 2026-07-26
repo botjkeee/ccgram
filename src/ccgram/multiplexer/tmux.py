@@ -36,6 +36,7 @@ from libtmux.exc import LibTmuxException
 
 from ..config import config
 from .base import (
+    AgentSessionRef,
     AgentStatus,
     CaptureResult,
     ForegroundInfo,
@@ -1109,6 +1110,16 @@ class TmuxManager:
         """tmux has no native agent status (``native_agent_status`` is False).
 
         Returns None so callers fall back to terminal scraping.
+        """
+        return None
+
+    async def agent_session(
+        self,
+        window_id: str,  # noqa: ARG002 — protocol signature
+    ) -> AgentSessionRef | None:
+        """tmux tracks no agent session (``native_agent_session`` is False).
+
+        Returns None so callers fall back to hooks and provider discovery.
         """
         return None
 

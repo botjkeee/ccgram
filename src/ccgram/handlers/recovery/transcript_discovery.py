@@ -4,8 +4,15 @@ Discovers and registers transcripts for providers without hook support
 (Codex, Gemini). Also handles provider auto-detection from pane process
 and shell ↔ agent transitions.
 
+On ``native_agent_session`` backends the multiplexer is asked first: it
+tracks the live agent session, so it is right where the two fallbacks are
+blind — resume (hook reports an id whose transcript is never written) and
+the start-up race (discovery skips a transcript whose header is not on disk
+yet and settles on an older session for the same cwd).
+
 Key components:
   - discover_and_register_transcript: main discovery function called per topic
+  - _native_session_transcript: multiplexer-reported session, preferred source
   - _detect_and_apply_provider: provider auto-detection from running process
   - _find_and_register_transcript: transcript search for hookless providers
 """
@@ -30,10 +37,132 @@ from ...multiplexer import multiplexer as tmux_manager
 from ...window_state_ports import identity_state
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ...providers.base import AgentProvider
     from ...multiplexer.base import WindowRef as TmuxWindow
 
 logger = structlog.get_logger()
+
+
+def _transcript_for_session_id(session_id: str, cwd: str) -> "Path | None":
+    """Resolve a bare session id to its transcript file, or None.
+
+    Mirrors ``SessionResolver._build_session_file_path`` (cwd encoded with
+    ``/`` → ``-``) and falls back to a glob when the window's recorded cwd has
+    drifted from the one the transcript was filed under.
+    """
+    # Lazy: config pulls the env/.env layer; this module is imported by the
+    # polling graph, which must stay import-light.
+    from ...config import config
+
+    if not session_id:
+        return None
+    if cwd:
+        direct = (
+            config.claude_projects_path / cwd.replace("/", "-") / f"{session_id}.jsonl"
+        )
+        if direct.exists():
+            return direct
+    matches = list(config.claude_projects_path.glob(f"*/{session_id}.jsonl"))
+    return matches[0] if matches else None
+
+
+async def _native_session_transcript(
+    window_id: str, cwd: str
+) -> "tuple[Path, str] | None":
+    """Return ``(transcript, session_id)`` reported by the multiplexer, or None.
+
+    None on backends without ``native_agent_session``, when the pane runs no
+    agent, or when the reported transcript is not on disk yet — every case
+    falls through to hooks and per-provider discovery.
+    """
+    if not tmux_manager.capabilities.native_agent_session:
+        return None
+    ref = await tmux_manager.agent_session(window_id)
+    if ref is None:
+        return None
+    # Lazy: keep pathlib next to its only use, matching this module's shape.
+    from pathlib import Path
+
+    if ref.kind == "path":
+        path = Path(ref.value)
+    else:
+        path = _transcript_for_session_id(ref.value, cwd)
+    if path is None or not path.exists():
+        return None
+    # Transcript stems are either the bare session id (claude) or
+    # "<timestamp>_<session id>" (pi); rpartition handles both.
+    session_id = ref.value if ref.kind == "id" else path.stem.rpartition("_")[2]
+    return path, (session_id or path.stem)
+
+
+async def _refresh_identity_from_pane(
+    window_id: str,
+    identity: identity_state.IdentityProjection,
+    w: "TmuxWindow | None",
+    *,
+    client: TelegramClient | None,
+    chat_id: int,
+    thread_id: int,
+) -> "tuple[identity_state.IdentityProjection, bool] | None":
+    """Re-detect the provider from the pane; return ``(identity, restarted)``.
+
+    ``None`` means the window vanished mid-detection and the caller should
+    abandon discovery for this tick.
+    """
+    if not (w and w.pane_current_command):
+        return identity, False
+
+    pgid_before = get_cached_foreground_pgid(window_id)
+    await _detect_and_apply_provider(
+        window_id, identity, w, client=client, chat_id=chat_id, thread_id=thread_id
+    )
+    refreshed = identity_state.get_identity(window_id)
+    if refreshed is None:
+        return None
+    process_restarted = _foreground_process_restarted(
+        before_pgid=pgid_before,
+        after_pgid=get_cached_foreground_pgid(window_id),
+        old_identity=identity,
+        new_identity=refreshed,
+    )
+    return refreshed, process_restarted
+
+
+async def _register_native_session(
+    window_id: str,
+    identity: identity_state.IdentityProjection,
+    native: "tuple[Path, str]",
+    *,
+    cwd: str,
+) -> None:
+    """Persist a multiplexer-reported session, unless it is already recorded."""
+    native_path, native_session_id = native
+    if str(native_path) == str(identity.transcript_path or ""):
+        return
+    provider_name = identity.provider_name or ""
+    session_map_sync.register_hookless_session(
+        window_id=window_id,
+        session_id=native_session_id,
+        cwd=cwd,
+        transcript_path=str(native_path),
+        provider_name=provider_name,
+    )
+    await asyncio.to_thread(
+        session_map_sync.write_hookless_session_map,
+        window_id=window_id,
+        session_id=native_session_id,
+        cwd=cwd,
+        transcript_path=str(native_path),
+        provider_name=provider_name,
+    )
+    logger.info(
+        "Registered native session: %s -> session_id=%s, transcript=%s",
+        window_id,
+        native_session_id,
+        native_path,
+    )
 
 
 def _session_id_already_bound(session_id: str, window_id: str) -> bool:
@@ -290,24 +419,24 @@ async def discover_and_register_transcript(
 
     w = _window or await tmux_manager.find_window_by_id(window_id)
 
-    pgid_before = get_cached_foreground_pgid(window_id)
-    original_identity = identity
-    process_restarted = False
-    if w and w.pane_current_command:
-        await _detect_and_apply_provider(
-            window_id, identity, w, client=client, chat_id=chat_id, thread_id=thread_id
+    refresh = await _refresh_identity_from_pane(
+        window_id, identity, w, client=client, chat_id=chat_id, thread_id=thread_id
+    )
+    if refresh is None:
+        return
+    identity, process_restarted = refresh
+
+    # Preferred source: the multiplexer's own view of the live session. Checked
+    # before the hook short-circuit below, because the hook's transcript_path is
+    # exactly what goes stale on resume.
+    native = await _native_session_transcript(
+        window_id, identity.cwd or (w.cwd if w else "")
+    )
+    if native is not None:
+        await _register_native_session(
+            window_id, identity, native, cwd=identity.cwd or (w.cwd if w else "")
         )
-        refreshed = identity_state.get_identity(window_id)
-        if refreshed is None:
-            return
-        identity = refreshed
-        pgid_after = get_cached_foreground_pgid(window_id)
-        process_restarted = _foreground_process_restarted(
-            before_pgid=pgid_before,
-            after_pgid=pgid_after,
-            old_identity=original_identity,
-            new_identity=identity,
-        )
+        return
 
     if _hook_already_resolved(window_id, identity) and not process_restarted:
         return

@@ -808,6 +808,7 @@ class TestProviderSwitchPromptSetup:
                     transcript_path="",
                 )
             }
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="fish", cwd="/proj")
             )
@@ -858,6 +859,7 @@ class TestProviderSwitchPromptSetup:
                     transcript_path="/path/to/claude.jsonl",
                 )
             }
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="claude", cwd="/proj")
             )
@@ -902,6 +904,7 @@ class TestProviderSwitchPromptSetup:
                     transcript_path="",
                 )
             }
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bash", cwd="/proj")
             )
@@ -953,6 +956,7 @@ class TestProviderSwitchPromptSetup:
                     transcript_path="",
                 )
             }
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bash", cwd="/proj")
             )
@@ -1045,6 +1049,7 @@ class TestProviderSwitchChain:
 
             # Step 1: claude → shell. User exits claude, pane shows fish.
             mock_detect.return_value = "shell"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(
                     pane_current_command="fish", cwd="/proj", pane_tty=""
@@ -1063,6 +1068,7 @@ class TestProviderSwitchChain:
 
             # Step 2: shell → gemini. User runs `gemini` in shell.
             mock_detect.return_value = "gemini"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(
                     pane_current_command="gemini", cwd="/proj", pane_tty=""
@@ -1079,6 +1085,7 @@ class TestProviderSwitchChain:
 
             # Step 3: gemini → shell. User exits gemini, pane shows fish.
             mock_detect.return_value = "shell"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(
                     pane_current_command="fish", cwd="/proj", pane_tty=""
@@ -1136,6 +1143,7 @@ class TestMaybeDiscoverTranscript:
                     provider_name="codex",
                 )
             }
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bun")
             )
@@ -1161,6 +1169,7 @@ class TestMaybeDiscoverTranscript:
             ) as mock_tmux,
         ):
             mock_ws.window_states = {"@7": MagicMock(session_id="", cwd="")}
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=None)
             await discover_and_register_transcript("@7")
         mock_sm.register_hookless_session.assert_not_called()
@@ -1206,6 +1215,7 @@ class TestMaybeDiscoverTranscript:
             ) as mock_config,
         ):
             mock_ws.window_states = {"@7": mock_state}
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.get_pane_title = AsyncMock(return_value="")
             mock_config.return_value = "ccgram:"
@@ -1296,6 +1306,7 @@ class TestMaybeDiscoverTranscript:
             }
             mock_config.return_value = "ccgram:"
             mock_window = MagicMock(pane_current_command="bun")
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.get_pane_title = AsyncMock(return_value="")
             await discover_and_register_transcript("@7")
@@ -1370,6 +1381,7 @@ class TestMaybeDiscoverTranscript:
                 ),
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bun")
             )
@@ -1425,6 +1437,7 @@ class TestMaybeDiscoverTranscript:
                 )
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bun")
             )
@@ -1469,6 +1482,7 @@ class TestMaybeDiscoverTranscript:
                 "@7": MagicMock(session_id="", cwd="/proj", provider_name="codex")
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bun")
             )
@@ -1523,6 +1537,7 @@ class TestMaybeDiscoverTranscript:
             }
             mock_config.return_value = "ccgram:"
             mock_window = MagicMock(pane_current_command="bun")
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.get_pane_title = AsyncMock(return_value="")
             mock_asyncio.to_thread = AsyncMock(side_effect=[event, None])
@@ -1596,6 +1611,7 @@ class TestMaybeDiscoverTranscript:
                 "@7": MagicMock(session_id="", cwd="/proj", provider_name="")
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.get_pane_title = AsyncMock(return_value="")
             await discover_and_register_transcript("@7")
@@ -1679,6 +1695,7 @@ class TestMaybeDiscoverTranscript:
                 "@9": mock_bound_state,
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bun")
             )
@@ -1714,6 +1731,7 @@ class TestMaybeDiscoverTranscript:
             mock_ws.window_states = {
                 "@7": MagicMock(session_id="", cwd="/proj", provider_name="")
             }
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             await discover_and_register_transcript("@7")
 
@@ -1753,6 +1771,7 @@ class TestMaybeDiscoverTranscript:
                 "@7": MagicMock(session_id="", cwd="/proj", provider_name="codex")
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(pane_current_command="bun")
             )
@@ -1798,6 +1817,7 @@ class TestMaybeDiscoverTranscript:
                 "@7": MagicMock(session_id="", cwd="/proj", provider_name="codex")
             }
             mock_config.return_value = "ccgram:"
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(return_value=None)
             mock_asyncio.to_thread = AsyncMock(return_value=None)
             await discover_and_register_transcript("@7")
@@ -2027,6 +2047,7 @@ class TestMaybeDiscoverTranscript:
         ):
             mock_ws.window_states = {"@7": mock_state}
             mock_sm.set_window_provider.side_effect = _set_window_provider
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(
                     pane_current_command="bun",
@@ -2126,6 +2147,7 @@ class TestMaybeDiscoverTranscript:
         ):
             mock_ws.window_states = {"@7": mock_state}
             mock_sm.set_window_provider.side_effect = _set_window_provider
+            mock_tmux.capabilities.native_agent_session = False
             mock_tmux.find_window_by_id = AsyncMock(
                 return_value=MagicMock(
                     pane_current_command="node",

@@ -17,6 +17,7 @@ from collections.abc import Sequence
 import pytest
 
 from ccgram.multiplexer.base import (
+    AgentSessionRef,
     AgentStatus,
     ForegroundInfo,
     MuxEvent,
@@ -346,6 +347,7 @@ def test_capabilities_are_pinned() -> None:
     assert caps.self_identify_env == "HERDR_PANE_ID"
     assert caps.supports_event_stream is True
     assert caps.native_worktrees is True
+    assert caps.native_agent_session is True
 
 
 def test_constructor_does_no_io() -> None:
@@ -1116,6 +1118,94 @@ async def test_agent_status_reads_focused_pane_in_split_tab() -> None:
         state="working", agent="claude", custom_status="running tests"
     )
     assert fake.sent("pane", "get", "w2:p1") is not None
+
+
+# ── agent_session: native session pointer ──────────────────────────────
+
+
+def _pane_get_with_session(session: object) -> str:
+    """Build a ``pane get`` payload carrying *session* as ``agent_session``."""
+    pane: dict = {
+        "agent": "claude",
+        "agent_status": "working",
+        "pane_id": "w2:p1",
+        "tab_id": "w2:t1",
+    }
+    if session is not None:
+        pane["agent_session"] = session
+    return json.dumps({"result": {"pane": pane, "type": "pane_info"}})
+
+
+async def test_agent_session_maps_path_kind() -> None:
+    # pi reports the transcript file directly.
+    out = _pane_get_with_session(
+        {
+            "agent": "pi",
+            "kind": "path",
+            "source": "herdr:pi",
+            "value": "/home/u/.pi/agent/sessions/--home-u--/2026-01-01T00-00-00-000Z_abc.jsonl",
+        }
+    )
+    fake = (
+        FakeHerdr().on("pane", "list", out=PANE_LIST_SINGLE).on("pane", "get", out=out)
+    )
+    assert await _manager(fake).agent_session("w2:t1") == AgentSessionRef(
+        kind="path",
+        value="/home/u/.pi/agent/sessions/--home-u--/2026-01-01T00-00-00-000Z_abc.jsonl",
+        agent="pi",
+    )
+
+
+async def test_agent_session_maps_id_kind() -> None:
+    # claude reports a session id the provider resolves to a file.
+    out = _pane_get_with_session(
+        {
+            "agent": "claude",
+            "kind": "id",
+            "source": "herdr:claude",
+            "value": "d0f64828-313b-45c1-85d7-eb75c6de9bdb",
+        }
+    )
+    fake = (
+        FakeHerdr().on("pane", "list", out=PANE_LIST_SINGLE).on("pane", "get", out=out)
+    )
+    assert await _manager(fake).agent_session("w2:t1") == AgentSessionRef(
+        kind="id", value="d0f64828-313b-45c1-85d7-eb75c6de9bdb", agent="claude"
+    )
+
+
+async def test_agent_session_none_when_pane_has_no_session() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_SINGLE)
+        .on("pane", "get", out=_pane_get_with_session(None))
+    )
+    assert await _manager(fake).agent_session("w2:t1") is None
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        {"kind": "", "value": "/tmp/x.jsonl"},
+        {"kind": "path", "value": ""},
+        {"kind": "unknown", "value": "/tmp/x.jsonl"},
+        "not-a-dict",
+    ],
+    ids=["empty-kind", "empty-value", "unknown-kind", "not-a-mapping"],
+)
+async def test_agent_session_rejects_malformed_payloads(session: object) -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_SINGLE)
+        .on("pane", "get", out=_pane_get_with_session(session))
+    )
+    assert await _manager(fake).agent_session("w2:t1") is None
+
+
+async def test_agent_session_none_for_empty_tab() -> None:
+    empty = json.dumps({"result": {"panes": [], "type": "pane_list"}})
+    fake = FakeHerdr().on("pane", "list", out=empty)
+    assert await _manager(fake).agent_session("w2:t1") is None
 
 
 async def test_agent_status_none_for_empty_tab() -> None:

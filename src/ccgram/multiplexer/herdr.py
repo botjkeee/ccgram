@@ -47,6 +47,7 @@ from pathlib import Path
 import structlog
 
 from .base import (
+    AgentSessionRef,
     AgentStatus,
     CaptureResult,
     ForegroundInfo,
@@ -90,6 +91,7 @@ _HERDR_CAPABILITIES = MultiplexerCapabilities(
     self_identify_env="HERDR_PANE_ID",
     supports_event_stream=True,
     native_worktrees=True,
+    native_agent_session=True,
 )
 
 # Filter for self-hosted / internal workspaces and tabs (e.g. ``__main__``).
@@ -974,6 +976,34 @@ class HerdrManager:
             state=state,
             agent=(pane.get("agent") or "").strip(),
             custom_status=(pane.get("custom_status") or "").strip(),
+        )
+
+    async def agent_session(self, window_id: str) -> AgentSessionRef | None:
+        """Native agent session pointer for the active pane in a tab.
+
+        *window_id* is a tab id. Reads ``pane.agent_session``, which herdr
+        tracks off the live agent process: ``kind="path"`` carries the
+        transcript file (pi), ``kind="id"`` a session id the provider resolves
+        (claude). Returns None when the tab is gone, has no pane, or the pane
+        runs no agent.
+        """
+        pane_id = await self._active_pane(window_id)
+        if pane_id is None:
+            return None
+        pane = await self._pane_get(pane_id)
+        if pane is None:
+            return None
+        session = pane.get("agent_session")
+        if not isinstance(session, dict):
+            return None
+        kind = (session.get("kind") or "").strip()
+        value = (session.get("value") or "").strip()
+        if kind not in ("id", "path") or not value:
+            return None
+        return AgentSessionRef(
+            kind=kind,
+            value=value,
+            agent=(session.get("agent") or "").strip(),
         )
 
     async def split_window(self, window_id: str) -> str | None:

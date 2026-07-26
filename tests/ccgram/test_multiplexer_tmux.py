@@ -64,6 +64,7 @@ class TestTmuxCapabilities:
             "self_identify_env": "TMUX_PANE",
             "supports_event_stream": False,
             "native_worktrees": False,
+            "native_agent_session": False,
         }
 
 

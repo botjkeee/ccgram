@@ -118,6 +118,26 @@ class AgentStatus:
 
 
 @dataclass(frozen=True)
+class AgentSessionRef:
+    """Native pointer to the agent session running in a window.
+
+    Only backends with ``capabilities.native_agent_session`` populate this
+    (herdr); others return ``None`` from ``agent_session()`` so callers fall
+    back to hooks and per-provider transcript discovery.
+
+    ``kind`` is ``"path"`` when ``value`` is the transcript file itself (pi),
+    or ``"id"`` when it is a session id the provider resolves to a file
+    (claude). The backend is authoritative: it tracks the live session, so it
+    stays correct across ``--continue``/resume, where the SessionStart hook
+    reports an id whose transcript is never written.
+    """
+
+    kind: str
+    value: str
+    agent: str = ""
+
+
+@dataclass(frozen=True)
 class MuxEvent:
     """A push event from a backend's event stream (``supports_event_stream``).
 
@@ -180,6 +200,16 @@ class MultiplexerCapabilities:
     Gates the ``/new`` worktree step onto ``create_worktree_window``: herdr makes
     the checkout and groups it under the parent repo in its workspace UI. tmux
     (False) keeps ccgram's own ``git worktree add`` + ``create_window`` path.
+    """
+
+    native_agent_session: bool = False
+    """True when the backend tracks the live agent session natively (herdr: True).
+
+    Gates ``agent_session()`` as the preferred source of a window's transcript,
+    ahead of hooks and per-provider discovery. Both of those have blind spots the
+    backend does not: the SessionStart hook reports a fresh id on resume while the
+    agent keeps writing the original transcript, and discovery races a
+    just-created transcript whose header is not yet on disk.
     """
 
 
@@ -346,6 +376,15 @@ class Multiplexer(Protocol):
         Only meaningful when ``capabilities.native_agent_status`` is True
         (herdr reads ``pane.agent_status``). tmux has no native agent status
         and returns None, so callers fall back to terminal scraping.
+        """
+        ...
+
+    async def agent_session(self, window_id: str) -> "AgentSessionRef | None":
+        """Return the active pane's native agent session pointer, or None.
+
+        Only meaningful when ``capabilities.native_agent_session`` is True
+        (herdr reads ``pane.agent_session``). tmux returns None, so callers
+        fall back to hooks and per-provider transcript discovery.
         """
         ...
 
