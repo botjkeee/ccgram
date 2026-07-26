@@ -95,7 +95,9 @@ _HERDR_CAPABILITIES = MultiplexerCapabilities(
 # Filter for self-hosted / internal workspaces and tabs (e.g. ``__main__``).
 # Entries matching this pattern are skipped in ``list_windows`` so ccgram
 # never auto-adopts itself. ``find_window_by_id`` deliberately bypasses it.
-_INTERNAL_LABEL_RE = re.compile(r"^__.*__$")
+# ``fm-*`` covers FirstMate crewmate tabs: the first mate itself is the topic
+# worth watching, its spawned crew is not.
+_INTERNAL_LABEL_RE = re.compile(r"^(__.*__|fm-.*)$")
 
 # The send-keys path uses tmux key vocabulary ("Up"/"BSpace"/…); map the few
 # that differ to herdr's kitty-style names. Unmapped tokens pass through.
