@@ -144,6 +144,26 @@ class TestStatusPollLoopDelegatesPeriodicTasks:
         ctx.mocks["run_periodic"].assert_called_once()
         ctx.mocks["run_lifecycle"].assert_called_once()
 
+    async def test_periodic_gets_full_list_lifecycle_gets_filtered(self):
+        """Load-bearing split: run_periodic_tasks must see internal windows
+        (its prune/sync work is state-sync for existing entries — internal
+        windows are alive and must not be pruned out), while
+        run_lifecycle_tasks (the unbound-window TTL, a discovery-shaped
+        surface) must not see them.
+        """
+        bot = AsyncMock(spec=Bot)
+        w_internal = _make_window("@internal", internal=True)
+        w_normal = _make_window("@normal", internal=False)
+        windows = [w_internal, w_normal]
+
+        ctx = await _run_loop_once(bot, bindings=[], windows=windows)
+
+        periodic_windows = ctx.mocks["run_periodic"].call_args[0][1]
+        assert periodic_windows == windows
+
+        lifecycle_windows = ctx.mocks["run_lifecycle"].call_args[0][1]
+        assert lifecycle_windows == [w_normal]
+
 
 class TestStatusPollLoopPassesWindowLookup:
     async def test_lookup_provides_correct_window(self):
