@@ -169,6 +169,25 @@ def _pane_index(pane_id: str) -> int:
     return int(num) if sep and num.isdigit() else 0
 
 
+def _status_from_pane(pane: dict | None) -> AgentStatus | None:
+    """Parse a ``pane get``/``pane list`` dict into an ``AgentStatus``.
+
+    Shared by ``agent_status`` and the ``watch_events`` reprime — both read the
+    same ``agent_status``/``agent``/``custom_status`` triple from a pane dict.
+    Returns None when *pane* is None or carries no (non-empty) status string.
+    """
+    if pane is None:
+        return None
+    state = (pane.get("agent_status") or "").strip()
+    if not state:
+        return None
+    return AgentStatus(
+        state=state,
+        agent=(pane.get("agent") or "").strip(),
+        custom_status=(pane.get("custom_status") or "").strip(),
+    )
+
+
 class HerdrManager:
     """Herdr backend satisfying the ``Multiplexer`` Protocol.
 
@@ -1043,16 +1062,7 @@ class HerdrManager:
         if pane_id is None:
             return None
         pane = await self._pane_get(pane_id)
-        if pane is None:
-            return None
-        state = (pane.get("agent_status") or "").strip()
-        if not state:
-            return None
-        return AgentStatus(
-            state=state,
-            agent=(pane.get("agent") or "").strip(),
-            custom_status=(pane.get("custom_status") or "").strip(),
-        )
+        return _status_from_pane(pane)
 
     async def agent_session(self, window_id: str) -> AgentSessionRef | None:
         """Native agent session pointer for the active pane in a tab.
@@ -1148,8 +1158,6 @@ class HerdrManager:
                         primed: set[str] = set()
                         for pane_id, window_id in pane_to_window.items():
                             primed.add(window_id)
-                            pane = await self._pane_get(pane_id) or {}
-                            state = (pane.get("agent_status") or "").strip()
                             # status=None is the negative marker: the agent left
                             # while the stream was down; a stale cached "working"
                             # must not outlive the reconnect.
@@ -1157,15 +1165,7 @@ class HerdrManager:
                                 kind="agent_status",
                                 window_id=window_id,
                                 pane_id=pane_id,
-                                status=AgentStatus(
-                                    state=state,
-                                    agent=(pane.get("agent") or "").strip(),
-                                    custom_status=(
-                                        pane.get("custom_status") or ""
-                                    ).strip(),
-                                )
-                                if state
-                                else None,
+                                status=_status_from_pane(await self._pane_get(pane_id)),
                             )
                         for window_id in ids:
                             if window_id not in primed:

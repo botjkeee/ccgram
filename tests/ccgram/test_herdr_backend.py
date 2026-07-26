@@ -1864,6 +1864,21 @@ async def test_watch_events_reprime_yields_none_status_for_agentless_pane() -> N
     assert got == [MuxEvent("agent_status", "w2:t1", "w2:p1", None)]
 
 
+async def test_watch_events_reprime_sweeps_watched_window_with_no_pane() -> None:
+    """A watched tab that resolves no pane still gets one reprime event."""
+    pane_list_empty = json.dumps({"result": {"panes": []}})
+    opener = _stream_of([])
+    fake = FakeHerdr().on("pane", "list", out=pane_list_empty)
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [MuxEvent("agent_status", "w2:t1", "", None)]
+
+
 async def test_watch_events_reprime_reads_subscribed_pane_not_refocused_one() -> None:
     """After a focus flip, reprime must read the pane the stream subscribed."""
     pane_list_before = json.dumps(
