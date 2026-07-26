@@ -485,6 +485,52 @@ async def test_reconciliation_listing_returns_none_on_tab_list_failure() -> None
     assert await empty.list_windows_for_reconciliation() == []
 
 
+async def test_tab_list_shape_drift_returns_none() -> None:
+    # exit 0 + valid JSON but a renamed key must read as "unavailable", not "no tabs".
+    drifted = json.dumps({"result": {"tab_items": [], "type": "tab_list"}})
+    fake = FakeHerdr().on("tab", "list", out=drifted)
+    assert await _manager(fake).list_windows_for_reconciliation() is None
+
+
+async def test_workspace_list_transient_failure_makes_listing_unavailable() -> None:
+    fake = (
+        FakeHerdr()
+        .on("tab", "list", out=TAB_LIST)
+        .on("pane", "list", out=PANE_LIST)
+        .on("workspace", "list", rc=1, err="socket error")
+    )
+    assert await _manager(fake).list_windows_for_reconciliation() is None
+
+
+async def test_workspace_list_unsupported_degrades_to_empty_labels() -> None:
+    # Older herdr without workspace addressing: CLI syntax errors exit 2.
+    fake = (
+        FakeHerdr()
+        .on("tab", "list", out=TAB_LIST)
+        .on("pane", "list", out=PANE_LIST)
+        .on("workspace", "list", rc=2, err="unknown subcommand")
+    )
+    refs = await _manager(fake).list_windows_for_reconciliation()
+    assert refs is not None and len(refs) == 2  # tabs listed, labels degrade
+
+
+async def test_workspace_labels_malformed_shapes_return_none() -> None:
+    # The contract promises None for EVERY unintelligible workspace answer:
+    # non-JSON stdout, an "error" payload, a missing "workspaces" key.
+    for out in (
+        "not json",
+        json.dumps({"error": {"code": 1}}),
+        json.dumps({"result": {"type": "workspace_list"}}),
+    ):
+        fake = (
+            FakeHerdr()
+            .on("tab", "list", out=TAB_LIST)
+            .on("pane", "list", out=PANE_LIST)
+            .on("workspace", "list", out=out)
+        )
+        assert await _manager(fake).list_windows_for_reconciliation() is None
+
+
 async def test_list_windows_returns_one_ref_per_tab() -> None:
     # Two tabs → two WindowRefs with tab_id as window_id, not pane ids.
     fake = (
@@ -1570,7 +1616,7 @@ async def test_ensure_session_raises_on_non_object_json_status() -> None:
         await _manager(fake).ensure_session()
 
 
-@pytest.mark.parametrize("protocol", [13, 17, "17", None, []])
+@pytest.mark.parametrize("protocol", [13, 18, "17", None, []])
 async def test_ensure_session_warns_and_continues_for_unverified_protocol(
     protocol: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:

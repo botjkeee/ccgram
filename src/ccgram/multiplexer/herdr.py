@@ -76,9 +76,9 @@ __all__ = [
 logger = structlog.get_logger()
 
 # Supported herdr socket protocols (``herdr status`` → ``server.protocol``).
-# 14–16 are accepted without warnings. Other versions are attempted with a
+# 14–17 are accepted without warnings. Other versions are attempted with a
 # warning so ccgram remains usable across herdr upgrades and downgrades.
-HERDR_SUPPORTED_PROTOCOLS = frozenset({14, 15, 16})
+HERDR_SUPPORTED_PROTOCOLS = frozenset({14, 15, 16, 17})
 HERDR_PROTOCOL_VERSION = max(HERDR_SUPPORTED_PROTOCOLS)
 
 # Static capability declaration for the herdr backend (design Task 7).
@@ -120,6 +120,10 @@ HerdrStreamOpener = Callable[[Sequence[Mapping[str, object]]], "AsyncIterator[di
 _RC_TIMEOUT = 124
 _RC_NO_BINARY = 127
 _CALL_TIMEOUT_SECONDS = 8.0
+
+# ``herdr`` CLI exit code for an unrecognized subcommand (older server without
+# workspace addressing) — distinct from a transient/socket failure.
+_RC_UNSUPPORTED_COMMAND = 2
 
 # Event-stream reconnect backoff (seconds): exponential, capped.
 _STREAM_BACKOFF_BASE = 1.0
@@ -300,11 +304,20 @@ class HerdrManager:
         return chosen.get("pane_id") or None
 
     async def _tab_list(self) -> list[dict] | None:
-        """Return raw tab dicts, or None when ``tab list`` is unavailable."""
+        """Return raw tab dicts, or None when ``tab list`` is unavailable.
+
+        An unintelligible result (missing/renamed ``tabs`` key — e.g. an
+        unverified protocol whose shape drifted) is also None: reconciliation
+        must see "listing unavailable", never an affirmative "zero tabs".
+        """
         result = await self._call_json(["tab", "list"])
         if result is None:
             return None
-        return [t for t in result.get("tabs", []) if t.get("tab_id")]
+        tabs = result.get("tabs")
+        if not isinstance(tabs, list):
+            logger.debug("herdr tab list returned unexpected shape")
+            return None
+        return [t for t in tabs if isinstance(t, dict) and t.get("tab_id")]
 
     async def _tab_get(self, tab_id: str) -> dict | None:
         """Return the raw tab dict from ``tab get <tab_id>``; None when gone."""
@@ -316,19 +329,36 @@ class HerdrManager:
         tab = result.get("tab")
         return tab if isinstance(tab, dict) else None
 
-    async def _workspace_labels(self) -> dict[str, str]:
+    async def _workspace_labels(self) -> dict[str, str] | None:
         """Map every ``workspace_id`` → its label (one ``workspace list`` call).
 
-        Empty when herdr exposes no workspace addressing (older server) — the
-        adaptive label then degrades to the agent name alone.
+        ``{}`` only when the command is unsupported (older server, CLI exit 2 —
+        the adaptive label degrades to the agent name alone) or the list is
+        genuinely empty. ``None`` on transient failure (socket down, timeout,
+        error payload, drifted shape) so reconciliation reports "unavailable"
+        instead of silently dropping the ``__*__`` workspace protection and
+        churning every topic title.
         """
-        result = await self._call_json(["workspace", "list"])
-        if not result:
+        rc, out, err = await self._run(["workspace", "list"])
+        if rc == _RC_UNSUPPORTED_COMMAND:
             return {}
+        if rc != 0:
+            logger.debug("herdr workspace list failed", rc=rc, err=err.strip())
+            return None
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError, ValueError:
+            return None
+        if not isinstance(payload, dict) or "error" in payload:
+            return None
+        result = payload.get("result")
+        workspaces = result.get("workspaces") if isinstance(result, dict) else None
+        if not isinstance(workspaces, list):
+            return None
         return {
             w.get("workspace_id", ""): w.get("label", "")
-            for w in result.get("workspaces", [])
-            if w.get("workspace_id")
+            for w in workspaces
+            if isinstance(w, dict) and w.get("workspace_id")
         }
 
     @staticmethod
@@ -451,6 +481,8 @@ class HerdrManager:
         if not tabs:
             return []
         workspace_labels = await self._workspace_labels()
+        if workspace_labels is None:
+            return None
 
         # Build per-tab pane index from pane list (tab_id → list[pane]).
         pane_result = await self._call_json(["pane", "list"])
@@ -502,8 +534,9 @@ class HerdrManager:
             return None
         tab_label = tab.get("label", "")
 
-        # Resolve workspace label for the full adaptive topic label.
-        workspace_labels = await self._workspace_labels()
+        # Resolve workspace label for the full adaptive topic label. Bound-window
+        # resolution must not fail over labels, so None degrades to {}.
+        workspace_labels = await self._workspace_labels() or {}
         workspace_label = workspace_labels.get(tab.get("workspace_id", ""), "")
         window_name = format_agent_topic_prefix(workspace_label, tab_label)
 
