@@ -610,6 +610,16 @@ async def test_list_windows_uses_focused_pane_as_representative() -> None:
     assert win.window_name == "ccgram ▸ feature"
 
 
+async def test_representative_pane_follows_focused_pane() -> None:
+    """A focused agentless pane must NOT inherit a neighbor's agent label."""
+    panes = [
+        {"pane_id": "w2:p1", "tab_id": "w2:t1", "focused": True, "cwd": "/x"},
+        {"pane_id": "w2:p2", "tab_id": "w2:t1", "focused": False, "agent": "claude"},
+    ]
+    agent, _cwd = HerdrManager._representative_pane(panes, "/x")
+    assert agent == ""
+
+
 async def test_list_windows_filters_internal_workspace_label() -> None:
     # Tabs in a __*__ workspace must not appear in list_windows.
     tab_list = json.dumps(

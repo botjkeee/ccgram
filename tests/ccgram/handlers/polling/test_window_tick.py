@@ -1,5 +1,6 @@
 import ast
 import inspect
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -175,6 +176,59 @@ class TestTickWindowEmptyQueue:
         ):
             await tick_window(bot, 1, 100, "@0", w)
             mock_status.assert_called_once()
+
+
+class TestTickWindowEffectiveWindow:
+    """Regression: agent-exit on herdr must reach both discovery and status.
+
+    herdr fills ``pane_current_command`` with the agent label, which goes
+    empty the moment the agent exits. ``tick_window`` must resolve the live
+    foreground once and hand the *effective* ref to both
+    ``discover_and_register_transcript`` and ``_update_status`` — otherwise
+    the shell-exit is invisible to both and the next message runs with no
+    approval flow.
+    """
+
+    async def test_effective_window_reaches_discovery_and_status(self, monkeypatch):
+        from ccgram.handlers.polling.window_tick import observe
+        from ccgram.multiplexer.base import ForegroundInfo, WindowRef
+
+        class _FakeMux:
+            capabilities = SimpleNamespace(native_agent_status=True)
+
+            async def foreground(self, window_id: str):
+                return ForegroundInfo(
+                    pid=1, pgid=1, argv=["/bin/zsh"], cwd="/x", tty=""
+                )
+
+        monkeypatch.setattr(observe, "tmux_manager", _FakeMux())
+
+        bot = AsyncMock(spec=Bot)
+        w = WindowRef(
+            window_id="w2:t1", window_name="app", cwd="/x", pane_current_command=""
+        )
+        mock_queue = MagicMock()
+        mock_queue.empty.return_value = True
+
+        with (
+            patch.object(
+                window_tick, "discover_and_register_transcript", new_callable=AsyncMock
+            ) as mock_discover,
+            patch.object(window_tick, "get_message_queue", return_value=mock_queue),
+            patch.object(
+                window_tick, "_update_status", new_callable=AsyncMock
+            ) as mock_status,
+            patch.object(window_tick, "_scan_window_panes", new_callable=AsyncMock),
+            patch.object(
+                window_tick, "_maybe_check_passive_shell", new_callable=AsyncMock
+            ),
+        ):
+            await tick_window(bot, 1, 100, "w2:t1", w)
+
+        discover_window = mock_discover.call_args.kwargs["_window"]
+        status_window = mock_status.call_args.kwargs["_window"]
+        assert discover_window.pane_current_command == "zsh"
+        assert status_window.pane_current_command == "zsh"
 
 
 class TestUpdateStatusInteractive:

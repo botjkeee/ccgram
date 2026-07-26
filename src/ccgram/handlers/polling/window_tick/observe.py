@@ -10,6 +10,7 @@ active — that side effect must run in the coordinator before
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import structlog
@@ -132,6 +133,26 @@ async def _native_agent_status(window_id: str) -> StatusUpdate | None:
     return None
 
 
+async def effective_window(window_id: str, w: "TmuxWindow") -> "TmuxWindow":
+    """Fill an empty ``pane_current_command`` from the live foreground process.
+
+    On ``native_agent_status`` backends (herdr) the field carries the agent
+    label and goes empty when the agent exits — unlike tmux, which reports the
+    shell. Shell-exit detection (``is_shell_prompt``) and provider re-detection
+    both key off this field, so resolve the foreground once when it is empty.
+    """
+    if w.pane_current_command or not tmux_manager.capabilities.native_agent_status:
+        return w
+    fg = await tmux_manager.foreground(window_id)
+    cmd = ""
+    if fg and fg.argv:
+        # lstrip("-"): login shells report argv0 "-zsh" (cf. shell_infra.py:170).
+        cmd = fg.argv[0].rsplit("/", 1)[-1].lstrip("-")
+    if not cmd:
+        return w
+    return replace(w, pane_current_command=cmd)
+
+
 def build_context(
     window_id: str,
     w: "TmuxWindow",
@@ -171,4 +192,5 @@ __all__ = [
     "_parse_with_pyte",
     "_resolve_status",
     "build_context",
+    "effective_window",
 ]

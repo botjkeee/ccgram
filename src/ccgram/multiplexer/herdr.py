@@ -457,21 +457,20 @@ class HerdrManager:
     def _representative_pane(tab_panes: list[dict], tab_cwd: str) -> tuple[str, str]:
         """Return ``(agent, cwd)`` for the representative pane in *tab_panes*.
 
-        Prefers the focused pane's agent; falls back to the first pane with a
-        non-empty agent. ``tab_cwd`` is the fallback when no pane has a cwd.
+        The focused pane is authoritative when present: its empty agent stays
+        empty (the pane dropped to a shell — sends route there via
+        ``_active_pane``, so the label must not borrow a neighbor's agent).
+        The first-non-empty fallback applies only when no pane is focused.
         """
         focused = next((p for p in tab_panes if p.get("focused")), None)
         if focused:
             agent = focused.get("display_agent") or focused.get("agent", "")
-            cwd = focused.get("cwd", "") or tab_cwd
-            if agent:
-                return agent, cwd
+            return agent, focused.get("cwd", "") or tab_cwd
         for pane in tab_panes:
             candidate = pane.get("display_agent") or pane.get("agent", "")
             if candidate:
                 return candidate, pane.get("cwd", "") or tab_cwd
-        cwd = (focused or {}).get("cwd", "") or tab_cwd if focused else tab_cwd
-        return "", cwd
+        return "", tab_cwd
 
     async def list_windows(self) -> list[WindowRef]:
         """List discovery-eligible windows (internal labels filtered).
