@@ -111,7 +111,10 @@ async def _refresh_identity_from_pane(
     ``None`` means the window vanished mid-detection and the caller should
     abandon discovery for this tick.
     """
-    if not (w and w.pane_current_command):
+    if w is None:
+        return identity, False
+    if not w.pane_current_command and not tmux_manager.capabilities.native_agent_status:
+        # tmux: an empty command is a transient read — keep today's early-out.
         return identity, False
 
     pgid_before = get_cached_foreground_pgid(window_id)

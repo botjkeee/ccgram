@@ -199,6 +199,54 @@ async def test_agent_status_returns_valid_state(herdr: HerdrManager, tmp_path) -
         assert await herdr.kill_window(window_id) is True
 
 
+async def test_send_keys_vocabulary_accepted_live(herdr, tmp_path) -> None:
+    """Every translated key name must pass herdr's pre-write validation."""
+    ok, _msg, _name, window_id = await herdr.create_window(
+        str(tmp_path), window_name="ccgram-keys-test", start_agent=False
+    )
+    assert ok
+    try:
+        # Foreground sink that survives C-c/C-d/C-z: interactive bash does not
+        # fork for a plain "while ...; done" typed at the prompt, so a bare
+        # SIGINT unwinds the whole loop back to the prompt (not just the
+        # child `cat`) and a follow-up EOF then kills the shell itself.
+        # `trap "" INT TSTP` makes the wrapping shell (and the `cat` it
+        # forks, which inherits the ignore disposition across exec) absorb
+        # Ctrl-C/Ctrl-Z; the loop keeps re-spawning `cat`, which reads EOF
+        # from Ctrl-D without any signal being involved at all.
+        await herdr.send(
+            window_id,
+            'trap "" INT TSTP; while true; do cat > /dev/null; done',
+            enter=True,
+        )
+        await asyncio.sleep(0.5)
+        # Order matches the brief; C-z is now also absorbed by the trap above
+        # (see comment), so it no longer needs to run last to avoid suspending
+        # the sink — kept last anyway to stay close to the brief's ordering.
+        for token in (
+            "Escape",
+            "Enter",
+            "Tab",
+            "BSpace",
+            "Space",
+            "BTab",
+            "Up",
+            "Down",
+            "Left",
+            "Right",
+            "M-Enter",
+            "C-c",
+            "C-d",
+            "C-y",
+            "C-z",
+        ):
+            assert await herdr.send(window_id, token, enter=False, literal=False), token
+    finally:
+        # The shell may already be gone — cleanup must not mask the assertion.
+        with contextlib.suppress(Exception):
+            await herdr.kill_window(window_id)
+
+
 async def test_watch_events_streams_window_death(herdr: HerdrManager, tmp_path) -> None:
     """watch_events delivers a window_died MuxEvent when the tab is killed.
 

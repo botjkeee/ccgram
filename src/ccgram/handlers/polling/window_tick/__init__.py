@@ -53,6 +53,7 @@ from .observe import (
     _parse_with_pyte,
     _resolve_status,
     build_context,
+    effective_window,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +80,8 @@ async def tick_window(
             bot, user_id, thread_id, window_id, runtime=rt
         )
         return
+
+    window = await effective_window(window_id, window)
 
     await discover_and_register_transcript(
         window_id,
@@ -130,6 +133,7 @@ __all__ = [
     "build_context",
     "build_status_line",
     "decide_tick",
+    "effective_window",
     "get_default_runtime",
     "is_shell_prompt",
     "lifecycle_strategy",

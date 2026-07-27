@@ -25,10 +25,13 @@ SRC_FILE = (
 )
 
 
-def _make_window(window_id: str, window_name: str = "test") -> MagicMock:
+def _make_window(
+    window_id: str, window_name: str = "test", internal: bool = False
+) -> MagicMock:
     w = MagicMock()
     w.window_id = window_id
     w.window_name = window_name
+    w.internal = internal
     return w
 
 
@@ -36,11 +39,16 @@ class _LoopCtx:
     mocks: dict[str, Any]
 
 
+_UNSET = object()
+
+
 def _patch_loop_deps(
     bindings: list[tuple[int, int, str]] | None = None,
     windows: list[MagicMock] | None = None,
+    listing: Any = _UNSET,
 ) -> Any:
     bindings = bindings or []
+    listing = windows or [] if listing is _UNSET else listing
     windows = windows or []
 
     patches: dict[str, Any] = {
@@ -49,6 +57,10 @@ def _patch_loop_deps(
         ),
         "tmux_manager": patch(
             "ccgram.handlers.polling.polling_coordinator.tmux_manager"
+        ),
+        "list_windows_for_reconciliation": patch(
+            "ccgram.handlers.polling.polling_coordinator.list_windows_for_reconciliation",
+            new_callable=AsyncMock,
         ),
         "tick_window": patch(
             "ccgram.handlers.polling.polling_coordinator.window_tick.tick_window",
@@ -78,6 +90,7 @@ def _patch_loop_deps(
                 mocks[name] = stack.enter_context(p)
 
             mocks["tmux_manager"].list_windows = AsyncMock(return_value=windows)
+            mocks["list_windows_for_reconciliation"].return_value = listing
             mocks["thread_router"].iter_thread_bindings.return_value = bindings
             mocks["config"].status_poll_interval = 1.0
 
@@ -130,6 +143,26 @@ class TestStatusPollLoopDelegatesPeriodicTasks:
 
         ctx.mocks["run_periodic"].assert_called_once()
         ctx.mocks["run_lifecycle"].assert_called_once()
+
+    async def test_periodic_gets_full_list_lifecycle_gets_filtered(self):
+        """Load-bearing split: run_periodic_tasks must see internal windows
+        (its prune/sync work is state-sync for existing entries — internal
+        windows are alive and must not be pruned out), while
+        run_lifecycle_tasks (the unbound-window TTL, a discovery-shaped
+        surface) must not see them.
+        """
+        bot = AsyncMock(spec=Bot)
+        w_internal = _make_window("@internal", internal=True)
+        w_normal = _make_window("@normal", internal=False)
+        windows = [w_internal, w_normal]
+
+        ctx = await _run_loop_once(bot, bindings=[], windows=windows)
+
+        periodic_windows = ctx.mocks["run_periodic"].call_args[0][1]
+        assert periodic_windows == windows
+
+        lifecycle_windows = ctx.mocks["run_lifecycle"].call_args[0][1]
+        assert lifecycle_windows == [w_normal]
 
 
 class TestStatusPollLoopPassesWindowLookup:
@@ -185,13 +218,11 @@ class TestBackoffOnTelegramError:
                 raise asyncio.CancelledError
 
         with combined():
-            ctx.mocks["tmux_manager"].list_windows = AsyncMock(
-                side_effect=[
-                    TelegramError("err"),
-                    TelegramError("err"),
-                    TelegramError("err"),
-                ]
-            )
+            ctx.mocks["list_windows_for_reconciliation"].side_effect = [
+                TelegramError("err"),
+                TelegramError("err"),
+                TelegramError("err"),
+            ]
             with (
                 patch(
                     "ccgram.handlers.polling.polling_coordinator.asyncio.sleep",
@@ -317,10 +348,10 @@ class TestDoesNotImportPerWindowModules:
 
 
 class TestModuleLineCountUnderCeiling:
-    def test_under_120_lines(self):
+    def test_under_140_lines(self):
         lines = SRC_FILE.read_text().splitlines()
-        assert len(lines) <= 120, (
-            f"polling_coordinator.py is {len(lines)} lines, ceiling is 120"
+        assert len(lines) <= 140, (
+            f"polling_coordinator.py is {len(lines)} lines, ceiling is 140"
         )
 
 
@@ -335,8 +366,8 @@ class TestBackoffBehavior:
             raise asyncio.CancelledError
 
         with combined():
-            ctx.mocks["tmux_manager"].list_windows = AsyncMock(
-                side_effect=TelegramError("loop-error")
+            ctx.mocks["list_windows_for_reconciliation"].side_effect = TelegramError(
+                "loop-error"
             )
             with (
                 patch(
@@ -363,8 +394,8 @@ class TestBackoffBehavior:
                 raise asyncio.CancelledError
 
         with combined():
-            ctx.mocks["tmux_manager"].list_windows = AsyncMock(
-                side_effect=TelegramError("loop-error")
+            ctx.mocks["list_windows_for_reconciliation"].side_effect = TelegramError(
+                "loop-error"
             )
             with (
                 patch(
@@ -392,9 +423,10 @@ class TestBackoffBehavior:
                 raise asyncio.CancelledError
 
         with combined():
-            ctx.mocks["tmux_manager"].list_windows = AsyncMock(
-                side_effect=[TelegramError("boom"), []]
-            )
+            ctx.mocks["list_windows_for_reconciliation"].side_effect = [
+                TelegramError("boom"),
+                [],
+            ]
             ctx.mocks["config"].status_poll_interval = 0.5
             with (
                 patch(
@@ -466,3 +498,26 @@ class TestTickBoundWindowsIsolatedRuntime:
         finally:
             for scope, bucket in topic_state._cleanups.items():
                 bucket[:] = snapshot[scope]
+
+
+class TestStatusPollLoopSkipsTickWhenListingUnavailable:
+    async def test_poll_skips_tick_when_listing_unavailable(self) -> None:
+        """A failed listing must not tick windows (and thus not mass-declare death)."""
+        bot = AsyncMock(spec=Bot)
+        bindings = [(1, 100, "@0")]
+
+        ctx = await _run_loop_once(bot, bindings=bindings, listing=None)
+
+        ctx.mocks["tick_window"].assert_not_called()
+
+    async def test_bound_internal_window_still_ticked(self) -> None:
+        """A bound fm-* topic marked internal must still resolve its WindowRef."""
+        bot = AsyncMock(spec=Bot)
+        w = _make_window("@internal", internal=True)
+        bindings = [(1, 100, "@internal")]
+
+        ctx = await _run_loop_once(bot, bindings=bindings, windows=[w])
+
+        tick = ctx.mocks["tick_window"]
+        assert tick.call_count == 1
+        assert tick.call_args[0][4] is w

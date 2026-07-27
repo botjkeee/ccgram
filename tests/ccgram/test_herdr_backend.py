@@ -485,6 +485,52 @@ async def test_reconciliation_listing_returns_none_on_tab_list_failure() -> None
     assert await empty.list_windows_for_reconciliation() == []
 
 
+async def test_tab_list_shape_drift_returns_none() -> None:
+    # exit 0 + valid JSON but a renamed key must read as "unavailable", not "no tabs".
+    drifted = json.dumps({"result": {"tab_items": [], "type": "tab_list"}})
+    fake = FakeHerdr().on("tab", "list", out=drifted)
+    assert await _manager(fake).list_windows_for_reconciliation() is None
+
+
+async def test_workspace_list_transient_failure_makes_listing_unavailable() -> None:
+    fake = (
+        FakeHerdr()
+        .on("tab", "list", out=TAB_LIST)
+        .on("pane", "list", out=PANE_LIST)
+        .on("workspace", "list", rc=1, err="socket error")
+    )
+    assert await _manager(fake).list_windows_for_reconciliation() is None
+
+
+async def test_workspace_list_unsupported_degrades_to_empty_labels() -> None:
+    # Older herdr without workspace addressing: CLI syntax errors exit 2.
+    fake = (
+        FakeHerdr()
+        .on("tab", "list", out=TAB_LIST)
+        .on("pane", "list", out=PANE_LIST)
+        .on("workspace", "list", rc=2, err="unknown subcommand")
+    )
+    refs = await _manager(fake).list_windows_for_reconciliation()
+    assert refs is not None and len(refs) == 2  # tabs listed, labels degrade
+
+
+async def test_workspace_labels_malformed_shapes_return_none() -> None:
+    # The contract promises None for EVERY unintelligible workspace answer:
+    # non-JSON stdout, an "error" payload, a missing "workspaces" key.
+    for out in (
+        "not json",
+        json.dumps({"error": {"code": 1}}),
+        json.dumps({"result": {"type": "workspace_list"}}),
+    ):
+        fake = (
+            FakeHerdr()
+            .on("tab", "list", out=TAB_LIST)
+            .on("pane", "list", out=PANE_LIST)
+            .on("workspace", "list", out=out)
+        )
+        assert await _manager(fake).list_windows_for_reconciliation() is None
+
+
 async def test_list_windows_returns_one_ref_per_tab() -> None:
     # Two tabs → two WindowRefs with tab_id as window_id, not pane ids.
     fake = (
@@ -562,6 +608,16 @@ async def test_list_windows_uses_focused_pane_as_representative() -> None:
     assert win.pane_current_command == "claude"
     # window_name is "<workspace> ▸ <tab label>"; agent name does not appear.
     assert win.window_name == "ccgram ▸ feature"
+
+
+async def test_representative_pane_follows_focused_pane() -> None:
+    """A focused agentless pane must NOT inherit a neighbor's agent label."""
+    panes = [
+        {"pane_id": "w2:p1", "tab_id": "w2:t1", "focused": True, "cwd": "/x"},
+        {"pane_id": "w2:p2", "tab_id": "w2:t1", "focused": False, "agent": "claude"},
+    ]
+    agent, _cwd = HerdrManager._representative_pane(panes, "/x")
+    assert agent == ""
 
 
 async def test_list_windows_filters_internal_workspace_label() -> None:
@@ -1480,7 +1536,7 @@ async def test_send_special_keys_uses_send_keys() -> None:
     assert (
         await _manager(fake).send("w2:t1", "Down", enter=False, literal=False) is True
     )
-    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "Down"]
+    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "down"]
 
 
 async def test_send_keys_appends_enter_when_requested() -> None:
@@ -1490,7 +1546,51 @@ async def test_send_keys_appends_enter_when_requested() -> None:
         .on("pane", "send-keys", out=OK)
     )
     await _manager(fake).send("w2:t1", "", enter=True, literal=False)
-    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "Enter"]
+    assert fake.sent("pane", "send-keys") == ["pane", "send-keys", "w2:p1", "enter"]
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("C-c", "ctrl+c"),
+        ("C-d", "ctrl+d"),
+        ("C-z", "ctrl+z"),
+        ("C-y", "ctrl+y"),
+        ("M-Enter", "alt+enter"),
+        ("Escape", "esc"),
+        ("Enter", "enter"),
+        ("Tab", "tab"),
+        ("BSpace", "backspace"),
+        ("Space", "space"),
+        ("Up", "up"),
+        ("Down", "down"),
+        ("Left", "left"),
+        ("Right", "right"),
+        ("ctrl+c", "ctrl+c"),  # already-native names pass through
+        ("x", "x"),  # plain characters pass through
+    ],
+)
+async def test_send_keys_translates_tmux_tokens(token: str, expected: str) -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_FOR_FIND)
+        .on("pane", "send-keys", out="")
+    )
+    ok = await _manager(fake).send("w2:t1", token, enter=False, literal=False)
+    assert ok is True
+    call = fake.sent("pane", "send-keys")
+    assert call is not None and call[3:] == [expected]
+
+
+async def test_send_keys_appended_enter_is_translated() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_FOR_FIND)
+        .on("pane", "send-keys", out="")
+    )
+    await _manager(fake).send("w2:t1", "Down", enter=True, literal=False)
+    call = fake.sent("pane", "send-keys")
+    assert call is not None and call[3:] == ["down", "enter"]
 
 
 async def test_send_returns_false_when_tab_has_no_panes() -> None:
@@ -1512,6 +1612,87 @@ async def test_send_to_pane_bypasses_tab_resolution() -> None:
     assert await _manager(fake).send_to_pane("w2:p2", "msg") is True
     assert fake.sent("pane", "run") == ["pane", "run", "w2:p2", "msg"]
     assert fake.sent("pane", "list") is None  # no resolution
+
+
+def _pane_get_json(pane_id: str, tab_id: str) -> str:
+    """Build a ``pane get`` envelope for the containment guard (Finding 2).
+
+    ``_pane_in_tab`` now resolves via ``pane get <pane_id>`` (one pane)
+    instead of ``pane list`` (every pane) — cheaper per-tick for the
+    non-active-sibling-pane guard.
+    """
+    return json.dumps(
+        {
+            "id": "cli:pane:get",
+            "result": {
+                "pane": {"pane_id": pane_id, "tab_id": tab_id},
+                "type": "pane_info",
+            },
+        }
+    )
+
+
+async def test_send_to_pane_rejects_pane_outside_window() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", out=_pane_get_json("w1:p1", "w1:t1"))
+        .on("pane", "send-text", out="")
+    )
+    ok = await _manager(fake).send_to_pane(
+        "w1:p1", "hi", enter=False, window_id="w2:t2"
+    )
+    assert ok is False
+    assert fake.sent("pane", "send-text") is None  # nothing was delivered
+
+
+async def test_capture_pane_by_id_rejects_pane_outside_window() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", out=_pane_get_json("w1:p1", "w1:t1"))
+        .on("pane", "read", out="secret")
+    )
+    text = await _manager(fake).capture_pane_by_id("w1:p1", window_id="w2:t2")
+    assert text is None
+    assert fake.sent("pane", "read") is None
+
+
+async def test_send_to_pane_allows_pane_inside_window() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", out=_pane_get_json("w1:p1", "w1:t1"))
+        .on("pane", "send-text", out="")
+    )
+    assert (
+        await _manager(fake).send_to_pane("w1:p1", "hi", enter=False, window_id="w1:t1")
+        is True
+    )
+    assert fake.sent("pane", "list") is None  # one-pane call, not a full listing
+
+
+async def test_send_to_pane_fails_closed_when_pane_list_unavailable() -> None:
+    # pane get unavailable (socket down / bad exit) → containment can't be
+    # proven, so a guarded send_to_pane must reject rather than allow.
+    fake = (
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", rc=127, err="connection refused")
+        .on("pane", "send-text", out="")
+    )
+    ok = await _manager(fake).send_to_pane(
+        "w1:p1", "hi", enter=False, window_id="w1:t1"
+    )
+    assert ok is False
+    assert fake.sent("pane", "send-text") is None  # nothing was delivered
+
+
+async def test_capture_pane_by_id_fails_closed_when_pane_list_unavailable() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", rc=127, err="connection refused")
+        .on("pane", "read", out="secret")
+    )
+    text = await _manager(fake).capture_pane_by_id("w1:p1", window_id="w1:t1")
+    assert text is None
+    assert fake.sent("pane", "read") is None  # nothing was read
 
 
 # ── Boundary: socket down, bad id, protocol ────────────────────────────
@@ -1570,7 +1751,7 @@ async def test_ensure_session_raises_on_non_object_json_status() -> None:
         await _manager(fake).ensure_session()
 
 
-@pytest.mark.parametrize("protocol", [13, 17, "17", None, []])
+@pytest.mark.parametrize("protocol", [13, 18, "17", None, []])
 async def test_ensure_session_warns_and_continues_for_unverified_protocol(
     protocol: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1635,6 +1816,41 @@ async def test_ensure_session_raises_when_server_not_running() -> None:
         await _manager(fake).ensure_session()
 
 
+async def test_ensure_session_adopts_socket_from_status() -> None:
+    status = json.dumps(
+        {
+            "server": {
+                "running": True,
+                "protocol": 17,
+                "compatible": True,
+                "socket": "/run/herdr/herdr.sock",
+            }
+        }
+    )
+    fake = FakeHerdr().on("status", "--json", out=status)
+    mgr = HerdrManager(socket_path=None, runner=fake)
+    mgr._socket_path = ""  # simulate unset env regardless of test environment
+    await mgr.ensure_session()
+    assert mgr._socket_path == "/run/herdr/herdr.sock"
+
+
+async def test_ensure_session_keeps_explicit_socket() -> None:
+    status = json.dumps(
+        {
+            "server": {
+                "running": True,
+                "protocol": 17,
+                "compatible": True,
+                "socket": "/run/other.sock",
+            }
+        }
+    )
+    fake = FakeHerdr().on("status", "--json", out=status)
+    mgr = HerdrManager(socket_path="/tmp/mine.sock", runner=fake)
+    await mgr.ensure_session()
+    assert mgr._socket_path == "/tmp/mine.sock"
+
+
 # ── Event stream: translate_event + watch_events ──────────────────────
 
 
@@ -1649,9 +1865,21 @@ def test_translate_event_maps_and_filters() -> None:
         },
         p2w,
     ) == MuxEvent("agent_status", "w2:t1", "w2:p1", AgentStatus("working", "codex", ""))
+    # underscore form of the agent-status event name is also matched.
+    assert translate_event(
+        {
+            "event": "pane_agent_status_changed",
+            "data": {"pane_id": "w2:p1", "agent_status": "working", "agent": "codex"},
+        },
+        p2w,
+    ) == MuxEvent("agent_status", "w2:t1", "w2:p1", AgentStatus("working", "codex", ""))
     # tab closed for a watched tab → window_died (no pane_id).
     assert translate_event(
         {"event": "tab_closed", "data": {"tab_id": "w2:t1"}}, p2w
+    ) == MuxEvent("window_died", "w2:t1")
+    # dot form of the tab-closed event name is also matched.
+    assert translate_event(
+        {"event": "tab.closed", "data": {"tab_id": "w2:t1"}}, p2w
     ) == MuxEvent("window_died", "w2:t1")
     # pane.exited is NOT a death signal (would falsely kill multi-pane tabs).
     assert (
@@ -1731,6 +1959,170 @@ async def test_watch_events_reprimes_filters_and_streams() -> None:
     assert {"type": "pane.exited"} not in subs
 
 
+async def test_watch_events_reprime_yields_none_status_for_agentless_pane() -> None:
+    """Reprime must emit status=None when the subscribed pane has no agent."""
+    pane_get_no_agent = json.dumps(
+        {
+            "id": "cli:pane:get",
+            "result": {
+                "pane": {
+                    "cwd": "/Users/alexei/Workspace/ccgram",
+                    "focused": True,
+                    "pane_id": "w2:p1",
+                    "tab_id": "w2:t1",
+                    "workspace_id": "w2",
+                },
+                "type": "pane_info",
+            },
+        }
+    )
+    opener = _stream_of([])
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_SINGLE)
+        .on("pane", "get", out=pane_get_no_agent)
+    )
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [MuxEvent("agent_status", "w2:t1", "w2:p1", None)]
+
+
+async def test_watch_events_reprime_sweeps_watched_window_with_no_pane() -> None:
+    """A watched tab that resolves no pane still gets one reprime event."""
+    pane_list_empty = json.dumps({"result": {"panes": []}})
+    opener = _stream_of([])
+    fake = FakeHerdr().on("pane", "list", out=pane_list_empty)
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [MuxEvent("agent_status", "w2:t1", "", None)]
+
+
+async def test_watch_events_reprime_reads_subscribed_pane_not_refocused_one() -> None:
+    """After a focus flip, reprime must read the pane the stream subscribed."""
+    pane_list_before = json.dumps(
+        {
+            "result": {
+                "panes": [
+                    {
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "cwd": "/x",
+                        "focused": True,
+                        "pane_id": "w2:p1",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                    {
+                        "agent": "codex",
+                        "agent_status": "working",
+                        "cwd": "/x",
+                        "focused": False,
+                        "pane_id": "w2:p2",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                ],
+            },
+        }
+    )
+    # If reprime re-resolved the active pane (agent_status(window_id)), a second
+    # "pane list" call here would report the flipped focus — p2 with a
+    # different status — and the reprime event would wrongly carry it.
+    pane_list_after_flip = json.dumps(
+        {
+            "result": {
+                "panes": [
+                    {
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "cwd": "/x",
+                        "focused": False,
+                        "pane_id": "w2:p1",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                    {
+                        "agent": "codex",
+                        "agent_status": "working",
+                        "cwd": "/x",
+                        "focused": True,
+                        "pane_id": "w2:p2",
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                    },
+                ],
+            },
+        }
+    )
+    pane_get_p1 = json.dumps(
+        {
+            "result": {
+                "pane": {
+                    "agent": "claude",
+                    "agent_status": "idle",
+                    "pane_id": "w2:p1",
+                    "tab_id": "w2:t1",
+                },
+                "type": "pane_info",
+            },
+        }
+    )
+    pane_get_p2 = json.dumps(
+        {
+            "result": {
+                "pane": {
+                    "agent": "codex",
+                    "agent_status": "working",
+                    "pane_id": "w2:p2",
+                    "tab_id": "w2:t1",
+                },
+                "type": "pane_info",
+            },
+        }
+    )
+    calls: list[list[str]] = []
+    pane_list_calls = {"n": 0}
+
+    async def runner(args: Sequence[str]) -> tuple[int, str, str]:
+        args = list(args)
+        calls.append(args)
+        if args[:2] == ["pane", "list"]:
+            pane_list_calls["n"] += 1
+            out = (
+                pane_list_before if pane_list_calls["n"] == 1 else pane_list_after_flip
+            )
+            return 0, out, ""
+        if args[:3] == ["pane", "get", "w2:p1"]:
+            return 0, pane_get_p1, ""
+        if args[:3] == ["pane", "get", "w2:p2"]:
+            return 0, pane_get_p2, ""
+        return 1, "", "unexpected call"
+
+    opener = _stream_of([])
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=runner, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [
+        MuxEvent("agent_status", "w2:t1", "w2:p1", AgentStatus("idle", "claude", ""))
+    ]
+    pane_get_calls = [c for c in calls if c[:2] == ["pane", "get"]]
+    assert pane_get_calls == [["pane", "get", "w2:p1"]]
+
+
 async def test_watch_events_reconnects_after_stream_drops(monkeypatch) -> None:
     # Zero backoff so the reconnect is instant (no real sleep in the test).
     monkeypatch.setattr("ccgram.multiplexer.herdr._STREAM_BACKOFF_BASE", 0.0)
@@ -1765,3 +2157,114 @@ async def test_watch_events_reconnects_after_stream_drops(monkeypatch) -> None:
         ("agent_status", "done"),
     ]
     assert len(opener.seen) >= 2  # type: ignore[attr-defined]  # reconnected
+
+
+async def test_stream_connect_failure_warns_once_then_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First stream failure is a WARNING, repeats are debug, success resets."""
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(herdr_module.asyncio, "sleep", fake_sleep)
+
+    warnings: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        herdr_module.logger,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
+    )
+
+    calls = {"n": 0}
+
+    async def opener(subscriptions):
+        n = calls["n"]
+        calls["n"] += 1
+        if n in (0, 1, 3):
+            raise OSError(f"boom{n}")
+        yield SUBSCRIBED
+
+    fake = FakeHerdr().on("pane", "list", out=json.dumps({"result": {"panes": []}}))
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    agen = mgr.watch_events(["w2:t1"])
+    try:
+        # connect0 fails (warn), connect1 fails (debug), connect2 succeeds and
+        # reprimes — the first yielded event surfaces after all three connects.
+        await anext(agen)
+        assert len(warnings) == 1
+
+        # connect2's stream ends → reconnect: connect3 fails (warn again, since
+        # the successful subscribe above reset the flag), connect4 succeeds.
+        await anext(agen)
+        assert len(warnings) == 2
+    finally:
+        await agen.aclose()
+
+
+def _labelled_listing(tab_label: str, ws_label: str) -> FakeHerdr:
+    tab_list = json.dumps(
+        {
+            "result": {
+                "tabs": [
+                    {
+                        "label": "app",
+                        "tab_id": "w1:t1",
+                        "workspace_id": "w1",
+                        "cwd": "/a",
+                    },
+                    {
+                        "label": tab_label,
+                        "tab_id": "w2:t1",
+                        "workspace_id": "w2",
+                        "cwd": "/b",
+                    },
+                ],
+                "type": "tab_list",
+            }
+        }
+    )
+    ws_list = json.dumps(
+        {
+            "result": {
+                "workspaces": [
+                    {"workspace_id": "w1", "label": "myproject", "cwd": "/a"},
+                    {"workspace_id": "w2", "label": ws_label, "cwd": "/b"},
+                ],
+                "type": "workspace_list",
+            }
+        }
+    )
+    empty_panes = json.dumps({"result": {"panes": [], "type": "pane_list"}})
+    return (
+        FakeHerdr()
+        .on("tab", "list", out=tab_list)
+        .on("pane", "list", out=empty_panes)
+        .on("workspace", "list", out=ws_list)
+    )
+
+
+async def test_reconciliation_listing_includes_internal_tabs_marked() -> None:
+    # fm-* tab label: present in the reconciliation listing, marked internal.
+    fake = _labelled_listing(tab_label="fm-task-42", ws_label="crew")
+    refs = await _manager(fake).list_windows_for_reconciliation()
+    assert refs is not None
+    by_id = {r.window_id: r for r in refs}
+    assert "w2:t1" in by_id, "internal tab must stay visible to liveness consumers"
+    assert by_id["w2:t1"].internal is True
+    assert by_id["w1:t1"].internal is False
+
+
+async def test_reconciliation_listing_marks_internal_workspace_label() -> None:
+    fake = _labelled_listing(tab_label="agent", ws_label="fm-crew")
+    refs = await _manager(fake).list_windows_for_reconciliation()
+    assert refs is not None
+    assert {r.window_id: r.internal for r in refs} == {"w1:t1": False, "w2:t1": True}
+
+
+async def test_list_windows_still_filters_fm_tabs() -> None:
+    # Discovery surface keeps today's behavior: fm-*/__*__ never surface.
+    fake = _labelled_listing(tab_label="fm-task-42", ws_label="crew")
+    wins = await _manager(fake).list_windows()
+    assert {w.window_id for w in wins} == {"w1:t1"}

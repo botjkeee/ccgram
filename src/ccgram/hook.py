@@ -31,7 +31,7 @@ from ccgram.hooks.adapters import (
     get_hook_adapter,
 )
 from ccgram.hooks.model import NormalizedHookEvent, ProviderName
-from ccgram.multiplexer.self_identify import resolve_self_identity
+from ccgram.multiplexer.self_identify import SelfIdentity, resolve_self_identity
 
 logger = structlog.get_logger()
 
@@ -716,8 +716,8 @@ def _resolve_window_id(pane_id: str) -> tuple[str, str, str, str] | None:
             text=True,
             timeout=5,
         )
-    except subprocess.TimeoutExpired:
-        logger.warning("tmux display-message timed out for pane %s", pane_id)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("tmux display-message failed for pane %s: %s", pane_id, exc)
         return None
     raw_output = result.stdout.strip()
     parts = raw_output.split("\t", 3)
@@ -1126,6 +1126,46 @@ def _provider_from_pane_tty(pane_tty: str) -> ProviderName | None:
     return None
 
 
+def _ancestor_tty() -> str:
+    """Terminal device of the nearest ancestor that has one.
+
+    Claude Code spawns hooks detached (setsid): the hook itself has no
+    controlling tty (/dev/tty raises ENXIO), so walk the PPID chain via /proc
+    and take the first ancestor whose stdin is a pty — the agent process
+    sitting on the pane's terminal. Returns "" when /proc is unavailable
+    (macOS) or no ancestor has one; the resolver then keeps today's
+    tmux-first behavior.
+    """
+    pid = os.getppid()
+    for _ in range(10):
+        if pid <= 1:
+            return ""
+        try:
+            tty = os.readlink(f"/proc/{pid}/fd/0")
+        except OSError:
+            tty = ""
+        if tty.startswith("/dev/pts/") or (
+            tty.startswith("/dev/tty") and tty != "/dev/tty"
+        ):
+            return tty
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                pid = int(fh.read().rpartition(")")[2].split()[1])
+        except OSError, ValueError, IndexError:
+            return ""
+    return ""
+
+
+def _resolve_hook_identity() -> SelfIdentity | None:
+    """Single resolution path for every hook identity consumer."""
+    return resolve_self_identity(
+        os.environ,
+        tmux_query=_resolve_window_id,
+        herdr_query=_resolve_herdr_tab_id,
+        process_tty=_ancestor_tty(),
+    )
+
+
 def _locate_primary_window(
     session_id: str, event: str, provider_name: str = "claude"
 ) -> tuple[str, str, str] | None:
@@ -1141,11 +1181,7 @@ def _locate_primary_window(
     panes resolve pane→tab via ``_resolve_herdr_tab_id`` so the session_map key
     becomes ``herdr:<tab_id>`` (matching ``list_windows``).
     """
-    identity = resolve_self_identity(
-        os.environ,
-        tmux_query=_resolve_window_id,
-        herdr_query=_resolve_herdr_tab_id,
-    )
+    identity = _resolve_hook_identity()
     if identity is None:
         if not os.environ.get("TMUX_PANE") and not os.environ.get("HERDR_PANE_ID"):
             logger.warning(
@@ -1205,7 +1241,7 @@ def _process_hook_stdin(
         )
     detected_provider = provider_name or payload_provider
     if detected_provider is None:
-        identity = resolve_self_identity(os.environ, tmux_query=_resolve_window_id)
+        identity = _resolve_hook_identity()
         if identity:
             detected_provider = _provider_from_pane_tty(identity.pane_tty)
     if detected_provider is None:

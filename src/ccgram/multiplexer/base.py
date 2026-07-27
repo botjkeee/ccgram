@@ -26,6 +26,11 @@ class WindowRef:
 
     Field names match the existing ``TmuxWindow`` fields so Task 2 call-site
     migration is mechanical.
+
+    ``internal`` marks backend-internal windows (herdr self-hosting ``__*__``
+    and FirstMate-crewmate ``fm-*`` labels): discovery/topic surfaces must skip
+    them, but liveness consumers (prune, status tick, startup re-resolution)
+    must still count them — an internal window is alive, just not a topic.
     """
 
     window_id: str
@@ -35,6 +40,7 @@ class WindowRef:
     pane_tty: str = ""
     pane_width: int = 0
     pane_height: int = 0
+    internal: bool = False
 
 
 @dataclass
@@ -146,7 +152,9 @@ class MuxEvent:
     backend-neutral. ``kind``:
 
     - ``"agent_status"`` — the pane's native agent run-state changed; ``status``
-      carries the new ``AgentStatus``.
+      carries the new ``AgentStatus``. ``status=None`` means "no agent present
+      in the watched pane" (a negative marker, not "unknown") — reprime emits
+      it for a subscribed pane with no live agent.
     - ``"window_died"`` — the window's agent process exited or the window/tab
       closed (``pane.exited`` / ``tab.closed`` on herdr).
     """

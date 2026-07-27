@@ -1033,6 +1033,28 @@ class TestResolveStaleIdsPreservesDeadBindings:
 
         assert thread_router.get_window_for_thread(100, 1) == "@1"
 
+    async def test_renamed_to_internal_label_keeps_binding_and_syncs_name(
+        self, mgr: SessionManager
+    ) -> None:
+        """A bound tab whose label changes to fm-* (FirstMate-crewmate) keeps its
+        binding, window state, and display-name sync — it is still alive on the
+        full (unfiltered) reconciliation listing, just excluded from topic
+        discovery. No code change needed here: resolve_stale_ids already
+        consumes the unfiltered listing."""
+        thread_router.bind_thread(100, 1, "@1", window_name="myproj")
+        mgr.window_states["@1"] = WindowState(cwd="/proj", provider_name="claude")
+
+        renamed = SimpleNamespace(window_id="@1", window_name="fm-crewmate")
+        with patch(
+            "ccgram.session.list_windows_for_reconciliation",
+            AsyncMock(return_value=[renamed]),
+        ):
+            await mgr.resolve_stale_ids()
+
+        assert thread_router.get_window_for_thread(100, 1) == "@1"
+        assert "@1" in mgr.window_states
+        assert thread_router.window_display_names.get("@1") == "fm-crewmate"
+
     async def test_dead_window_state_preserved(self, mgr: SessionManager) -> None:
         thread_router.bind_thread(100, 1, "@1", window_name="proj")
         mgr.window_states["@1"] = WindowState(cwd="/my/project", provider_name="codex")

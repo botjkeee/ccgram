@@ -53,14 +53,26 @@ def resolve_self_identity(
     *,
     tmux_query: TmuxQuery,
     herdr_query: HerdrQuery | None = None,
+    process_tty: str = "",
 ) -> SelfIdentity | None:
     """Resolve the firing window's identity from ``env``.
 
+    Innermost multiplexer wins: tmux wins unless its resolution is provably
+    stale AND a herdr identity resolves.
+
     Dispatches on which backend's ``self_identify_env`` var is present:
     ``$TMUX_PANE`` → tmux (via ``tmux_query``), ``$HERDR_PANE_ID`` → herdr.
-    Returns None when neither is set or the tmux probe fails (today's
-    "cannot determine window" path). tmux wins when both are present (a herdr
-    pane running inside a tmux pane still reports the outer tmux identity).
+    A herdr pane inherits the server's env unsanitized: when the herdr server
+    itself runs inside tmux, every agent pane carries a stale ``TMUX_PANE``
+    pointing at the pane hosting herdr, so the tmux probe succeeds but
+    resolves to the wrong pane. ``process_tty`` (the originating agent's tty,
+    from ``hook._ancestor_tty()``) lets the resolver detect that: when it
+    disagrees with the resolved pane's tty AND a herdr identity resolves, the
+    herdr identity wins. Without a usable herdr fallback the tmux identity
+    still stands — a stale-looking resolution must never DROP the hook, or
+    tmux-only setups would regress. A failed tmux probe (server gone, binary
+    missing) falls through to herdr when ``HERDR_PANE_ID`` is set; otherwise
+    it returns None (today's "cannot determine window" path).
 
     For herdr: ``herdr_query(pane_id)`` resolves the pane to its containing tab
     id so ``session_window_key`` becomes ``herdr:<tab_id>`` (matching
@@ -69,22 +81,12 @@ def resolve_self_identity(
     the hook skips the session_map write until the socket is available.
     """
     tmux_pane = env.get("TMUX_PANE", "")
-    if tmux_pane:
-        resolved = tmux_query(tmux_pane)
-        if resolved is None:
-            return None
-        session_window_key, window_id, window_name, pane_tty = resolved
-        return SelfIdentity(
-            mux="tmux",
-            session_window_key=session_window_key,
-            window_id=window_id,
-            window_name=window_name,
-            pane_tty=pane_tty,
-        )
-
     herdr_pane = env.get("HERDR_PANE_ID", "")
-    if herdr_pane:
-        tab_id = herdr_query(herdr_pane) if herdr_query is not None else None
+
+    def _herdr_identity() -> SelfIdentity | None:
+        if not herdr_pane or herdr_query is None:
+            return None
+        tab_id = herdr_query(herdr_pane)
         if tab_id is None:
             return None
         return SelfIdentity(
@@ -94,4 +96,23 @@ def resolve_self_identity(
             window_name="",
         )
 
-    return None
+    if tmux_pane:
+        resolved = tmux_query(tmux_pane)
+        if resolved is not None:
+            session_window_key, window_id, window_name, pane_tty = resolved
+            stale = bool(process_tty) and bool(pane_tty) and process_tty != pane_tty
+            if stale and (herdr := _herdr_identity()) is not None:
+                return herdr
+            return SelfIdentity(
+                mux="tmux",
+                session_window_key=session_window_key,
+                window_id=window_id,
+                window_name=window_name,
+                pane_tty=pane_tty,
+            )
+        if not herdr_pane:
+            return None
+        # tmux probe failed (server gone, binary missing) but a herdr pane id
+        # exists — fall through instead of dropping the hook.
+
+    return _herdr_identity() if herdr_pane else None
