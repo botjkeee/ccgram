@@ -292,12 +292,12 @@ ccgram talks to the terminal multiplexer through a backend-neutral seam. tmux is
 ```bash
 # .env or shell environment
 CCGRAM_MULTIPLEXER=herdr
-# HERDR_SOCKET_PATH=/path/to/herdr.sock   # optional; defaults to herdr's socket
+# HERDR_SOCKET_PATH=/path/to/herdr.sock   # optional; unset adopts the socket `herdr status` reports
 ```
 
 ### Protocol version pinning
 
-ccgram accepts herdr socket protocols 14, 15, and 16 without warnings. On the first call it reads `herdr status`; an older, newer, missing, or otherwise unknown protocol emits a warning and ccgram continues in best-effort mode, so CLI-backed operations can still work after a herdr upgrade or downgrade. A stopped server, failed status command, or malformed status response still prevents startup. Run the live herdr contract suite before relying on an untested protocol.
+ccgram accepts herdr socket protocols 14, 15, 16, and 17 without warnings. On the first call it reads `herdr status`; an older, newer, missing, or otherwise unknown protocol emits a warning and ccgram continues in best-effort mode, so CLI-backed operations can still work after a herdr upgrade or downgrade. A stopped server, failed status command, or malformed status response still prevents startup. Run the live herdr contract suite before relying on an untested protocol.
 
 ### Differences from tmux
 
