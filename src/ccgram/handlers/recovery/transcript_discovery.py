@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ...providers import (
+    detect_provider_from_command,
     detect_provider_from_pane,
     detect_provider_from_runtime,
     detect_provider_from_transcript_path,
@@ -45,37 +46,60 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-def _transcript_for_session_id(session_id: str, cwd: str) -> "Path | None":
-    """Resolve a bare session id to its transcript file, or None.
+def _provider_name_for_agent(agent: str, recorded_provider: str) -> str:
+    """Map a backend-reported agent label onto a provider name ("" = unknown).
 
-    Mirrors ``SessionResolver._build_session_file_path`` (cwd encoded with
-    ``/`` → ``-``) and falls back to a glob when the window's recorded cwd has
-    drifted from the one the transcript was filed under.
+    The label is a display name, not a bare provider name — herdr reports the
+    same suffixed forms that reach ``pane_current_command`` (``claude-code``),
+    so it goes through the same normalization. An empty label means the backend
+    named no agent for the session; the window's recorded provider is then the
+    best available answer. A label that normalizes to nothing is a genuinely
+    foreign agent and stays unknown.
     """
-    # Lazy: config pulls the env/.env layer; this module is imported by the
-    # polling graph, which must stay import-light.
-    from ...config import config
+    if not agent:
+        return recorded_provider
+    return detect_provider_from_command(agent)
 
+
+def _transcript_for_session_id(
+    agent: str, session_id: str, cwd: str, *, recorded_provider: str = ""
+) -> "Path | None":
+    """Resolve a session id via the provider that owns *agent*'s storage layout.
+
+    Every provider files transcripts differently (Claude under
+    ``~/.claude/projects``, Codex under ``~/.codex/sessions``), so the layout
+    lives in the provider, not here. An agent this build has no provider for
+    resolves nothing rather than being guessed at with another layout.
+    """
     if not session_id:
         return None
-    if cwd:
-        direct = (
-            config.claude_projects_path / cwd.replace("/", "-") / f"{session_id}.jsonl"
-        )
-        if direct.exists():
-            return direct
-    matches = list(config.claude_projects_path.glob(f"*/{session_id}.jsonl"))
-    return matches[0] if matches else None
+    name = _provider_name_for_agent(agent, recorded_provider)
+    if not name:
+        return None
+    provider = get_provider_for_window("", name)
+    if provider.capabilities.name != name:
+        # get_provider_for_window degrades an unknown name to the config
+        # default; resolving a foreign id against that provider's layout could
+        # only produce a wrong answer.
+        return None
+    resolved = provider.transcript_for_session_id(session_id, cwd)
+    if not resolved:
+        return None
+    # Lazy: keep pathlib next to its only use, matching this module's shape.
+    from pathlib import Path
+
+    return Path(resolved)
 
 
 async def _native_session_transcript(
-    window_id: str, cwd: str
+    window_id: str, cwd: str, provider_name: str = ""
 ) -> "tuple[Path, str] | None":
     """Return ``(transcript, session_id)`` reported by the multiplexer, or None.
 
     None on backends without ``native_agent_session``, when the pane runs no
     agent, or when the reported transcript is not on disk yet — every case
-    falls through to hooks and per-provider discovery.
+    falls through to hooks and per-provider discovery. *provider_name* is the
+    window's recorded provider, used only when the backend names no agent.
     """
     if not tmux_manager.capabilities.native_agent_session:
         return None
@@ -88,7 +112,9 @@ async def _native_session_transcript(
     if ref.kind == "path":
         path = Path(ref.value)
     else:
-        path = _transcript_for_session_id(ref.value, cwd)
+        path = _transcript_for_session_id(
+            ref.agent, ref.value, cwd, recorded_provider=provider_name
+        )
     if path is None or not path.exists():
         return None
     # Transcript stems are either the bare session id (claude) or
@@ -111,7 +137,10 @@ async def _refresh_identity_from_pane(
     ``None`` means the window vanished mid-detection and the caller should
     abandon discovery for this tick.
     """
-    if not (w and w.pane_current_command):
+    if w is None:
+        return identity, False
+    if not w.pane_current_command and not tmux_manager.capabilities.native_agent_status:
+        # tmux: an empty command is a transient read — keep today's early-out.
         return identity, False
 
     pgid_before = get_cached_foreground_pgid(window_id)
@@ -430,7 +459,9 @@ async def discover_and_register_transcript(
     # before the hook short-circuit below, because the hook's transcript_path is
     # exactly what goes stale on resume.
     native = await _native_session_transcript(
-        window_id, identity.cwd or (w.cwd if w else "")
+        window_id,
+        identity.cwd or (w.cwd if w else ""),
+        identity.provider_name or "",
     )
     if native is not None:
         await _register_native_session(

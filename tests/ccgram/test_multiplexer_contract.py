@@ -25,6 +25,9 @@ CANDIDATE_BACKENDS = ["tmux", "herdr"]
 CONTRACT_METHODS = (
     "ensure_session",
     "list_windows",
+    "list_windows_for_reconciliation",
+    "list_workspaces",
+    "agent_session",
     "capture_scrollback",
     "pane_dims",
     "send",

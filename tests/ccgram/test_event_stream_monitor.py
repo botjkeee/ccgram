@@ -6,7 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ccgram.event_stream_monitor import EventStreamMonitor
-from ccgram.multiplexer import agent_status_cache
+from ccgram.multiplexer import agent_status_cache, foreground_cache
 from ccgram.multiplexer.base import AgentStatus, MuxEvent
 
 
@@ -18,9 +18,38 @@ async def test_dispatch_agent_status_updates_cache() -> None:
     assert agent_status_cache.get_status("w2:t1") == status
 
 
+async def test_dispatch_none_status_writes_negative_marker() -> None:
+    agent_status_cache.reset()
+    agent_status_cache.set_status(
+        "w2:t1", AgentStatus(state="working", agent="claude", custom_status="")
+    )
+    monitor = EventStreamMonitor(MagicMock(), lambda: {"w2:t1"})
+    await monitor._dispatch(MuxEvent("agent_status", "w2:t1", "w2:p1", None))
+    assert agent_status_cache.lookup("w2:t1") == (True, None)  # warm negative, NOT cold
+
+
+async def test_dispatch_unknown_status_evicts_instead_of_marking() -> None:
+    """An unreadable pane must go cold, so the poll layer's fallback still runs.
+
+    Regression: reprime reported an unreadable/unresolved pane as
+    ``status=None``, indistinguishable from a genuinely agentless one, and the
+    resulting warm-negative marker suppressed ``_native_agent_status``'s
+    subprocess fallback until the stream restarted.
+    """
+    agent_status_cache.reset()
+    agent_status_cache.set_status("w2:t1", AgentStatus("working", "claude", ""))
+    monitor = EventStreamMonitor(MagicMock(), lambda: {"w2:t1"})
+
+    await monitor._dispatch(MuxEvent("agent_status_unknown", "w2:t1", "w2:p1"))
+
+    assert agent_status_cache.lookup("w2:t1") == (False, None)  # cold, NOT negative
+
+
 async def test_dispatch_window_died_clears_cache_and_notifies_bound_users() -> None:
     agent_status_cache.reset()
     agent_status_cache.set_status("w2:t1", AgentStatus("working"))
+    foreground_cache.reset()
+    foreground_cache.set_command("w2:t1", "zsh")
     monitor = EventStreamMonitor(MagicMock(), lambda: {"w2:t1"})
 
     notify = AsyncMock()
@@ -40,6 +69,7 @@ async def test_dispatch_window_died_clears_cache_and_notifies_bound_users() -> N
         await monitor._dispatch(MuxEvent("window_died", "w2:t1"))
 
     assert agent_status_cache.get_status("w2:t1") is None
+    assert foreground_cache.lookup("w2:t1") == (False, "")  # evicted on window death
     notify.assert_awaited_once_with("BOT", 7, 42, "w2:t1")
 
 

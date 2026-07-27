@@ -285,19 +285,19 @@ ccgram talks to the terminal multiplexer through a backend-neutral seam. tmux is
 
 1. **Install herdr** and make sure the `herdr` binary is in `PATH`. Start its server so the control socket exists.
 2. **Select the backend:** set `CCGRAM_MULTIPLEXER=herdr` (env var or `.env`). The default is `tmux`.
-3. **Socket path (optional):** ccgram reads `$HERDR_SOCKET_PATH` to find the server. Leave it unset to use herdr's default socket; set it to target a specific server.
+3. **Socket path (optional):** ccgram reads `$HERDR_SOCKET_PATH` to find the server. Leave it unset and ccgram adopts the socket path reported by `herdr status` at startup, including for the push event stream; set it to target a specific server.
 4. **Install the ccgram hook as usual:** `ccgram hook --install`. The same Claude Code hook works on both backends — it resolves which window fired from `$HERDR_PANE_ID` (tmux uses `$TMUX_PANE`), so no herdr-specific hook step is required.
 5. **Verify:** `ccgram doctor`. When `CCGRAM_MULTIPLEXER=herdr`, doctor checks the `herdr` binary, socket reachability, the pinned protocol version, and that ccgram's and herdr's own Claude hooks coexist in `settings.json` (instead of the tmux checks).
 
 ```bash
 # .env or shell environment
 CCGRAM_MULTIPLEXER=herdr
-# HERDR_SOCKET_PATH=/path/to/herdr.sock   # optional; defaults to herdr's socket
+# HERDR_SOCKET_PATH=/path/to/herdr.sock   # optional; unset adopts the socket `herdr status` reports
 ```
 
 ### Protocol version pinning
 
-ccgram accepts herdr socket protocols 14, 15, and 16 without warnings. On the first call it reads `herdr status`; an older, newer, missing, or otherwise unknown protocol emits a warning and ccgram continues in best-effort mode, so CLI-backed operations can still work after a herdr upgrade or downgrade. A stopped server, failed status command, or malformed status response still prevents startup. Run the live herdr contract suite before relying on an untested protocol.
+ccgram accepts herdr socket protocols 14, 15, 16, and 17 without warnings. On the first call it reads `herdr status`; an older, newer, missing, or otherwise unknown protocol emits a warning and ccgram continues in best-effort mode, so CLI-backed operations can still work after a herdr upgrade or downgrade. A stopped server, failed status command, or malformed status response still prevents startup. Run the live herdr contract suite before relying on an untested protocol.
 
 ### Differences from tmux
 
@@ -316,7 +316,7 @@ Creating sessions from the terminal on herdr is covered in [Creating Sessions fr
 
 > **Workspace picker:** On herdr, `/new` shows an extra step after directory selection — a workspace picker that lets you pin the new tab inside an existing herdr workspace. If no workspaces exist yet (or none matches the selected directory), the picker is skipped and ccgram creates a new workspace automatically.
 >
-> **Self-hosting escape hatch:** Workspaces or tabs whose label matches `__*__` (e.g. `__main__`) are invisible to ccgram. Use this naming convention to run ccgram itself inside herdr without it auto-adopting its own terminal as a topic.
+> **Self-hosting escape hatch:** Workspaces or tabs whose label matches `__*__` (e.g. `__main__`) or `fm-*` (FirstMate crewmate tabs) are invisible to ccgram as topics. Use this naming convention to run ccgram itself inside herdr without it auto-adopting its own terminal as a topic.
 
 ## Auto-Close Behavior
 

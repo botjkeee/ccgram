@@ -28,6 +28,7 @@ from collections.abc import Callable
 import structlog
 
 from .multiplexer import agent_status_cache
+from .multiplexer import foreground_cache
 from .multiplexer import multiplexer as mux
 from .multiplexer.base import MuxEvent
 from .telegram_client import TelegramClient, unwrap_bot
@@ -112,10 +113,19 @@ class EventStreamMonitor:
                     logger.warning("event-stream dispatch failed: %s", exc)
 
     async def _dispatch(self, event: MuxEvent) -> None:
-        if event.kind == "agent_status" and event.status is not None:
+        if event.kind == "agent_status":
+            # None flows through as the negative marker, NOT an eviction —
+            # an evicted (cold) entry would re-fork the subprocess fallback
+            # every tick for agentless panes.
             agent_status_cache.set_status(event.window_id, event.status)
+        elif event.kind == "agent_status_unknown":
+            # The backend could not read the state. Evict so the poll layer
+            # falls back to its own lookup instead of trusting a marker that
+            # would claim "no agent" until the next stream restart.
+            agent_status_cache.clear(event.window_id)
         elif event.kind == "window_died":
             agent_status_cache.clear(event.window_id)
+            foreground_cache.clear(event.window_id)
             await self._notify_dead(event.window_id)
 
     async def _notify_dead(self, window_id: str) -> None:

@@ -16,6 +16,7 @@ from telegram.error import TelegramError
 
 from ...thread_router import thread_router
 from ...multiplexer import multiplexer as tmux_manager
+from ...multiplexer.reconciliation import list_windows_for_reconciliation
 from ...utils import log_throttled
 from . import window_tick
 from .polling_runtime import PollingRuntime
@@ -96,12 +97,24 @@ async def status_poll_loop(bot: "Bot") -> None:
     _error_streak = 0
     while True:
         try:
-            all_windows = await tmux_manager.list_windows()
-            window_lookup = {w.window_id: w for w in all_windows}
+            refs = await list_windows_for_reconciliation(tmux_manager)
+            if refs is None:
+                # A failed listing is not "zero windows": ticking with an empty
+                # lookup would dead-banner every bound topic (see 02eeb16 for
+                # the monitor-side fix of the same class).
+                log_throttled(
+                    logger,
+                    "status-poll:listing",
+                    "Multiplexer listing unavailable; skipping status tick",
+                )
+                await asyncio.sleep(poll_interval)
+                continue
+            window_lookup = {w.window_id: w for w in refs}
+            unbound_eligible = [w for w in refs if not w.internal]
 
-            await run_periodic_tasks(client, all_windows, timers)
+            await run_periodic_tasks(client, refs, timers)
             await _tick_bound_windows(bot, window_lookup)
-            await run_lifecycle_tasks(client, all_windows)
+            await run_lifecycle_tasks(client, unbound_eligible)
 
         except _LoopError:
             logger.exception("Status poll loop error")

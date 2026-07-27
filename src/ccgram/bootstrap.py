@@ -95,6 +95,30 @@ async def register_provider_commands(application: Application) -> None:
     setup_menu_refresh_job(application)
 
 
+_HOOK_ONLY_EXTRAS = (
+    "hooks would add Claude-only extras (completion summary, "
+    "subagent/teammate events, instant prompts)"
+)
+
+
+def _multiplexer_covers_hook_signals() -> bool:
+    """True when the multiplexer natively provides what the hooks would report.
+
+    A backend that reports the live agent session *and* pushes agent-status /
+    window-death events (herdr) delivers session binding, run state and death
+    detection for every agent — the signals the rest of ccgram depends on. What
+    the Claude hooks add on top is enrichment, so their absence is not a
+    degraded state and must not warn on every startup. A backend without both
+    (tmux) keeps the warning: there the hooks are the only source.
+    """
+    try:
+        caps = multiplexer.capabilities
+    except RuntimeError:
+        # Not wired yet: stay conservative and let the caller warn.
+        return False
+    return bool(caps.native_agent_session and caps.supports_event_stream)
+
+
 def verify_hooks_installed() -> None:
     """Warn if managed hooks are missing for the default provider."""
     provider = get_provider()
@@ -119,27 +143,38 @@ def verify_hooks_installed() -> None:
     # Lazy: hook helpers used only during the hook-verify step
     from .hook import _claude_settings_file, get_installed_events
 
+    # The multiplexer already covering the load-bearing signals turns every
+    # message below from "you are degraded" into "you could have more".
+    covered = _multiplexer_covers_hook_signals()
+    report = logger.debug if covered else logger.warning
+    suffix = f"{_HOOK_ONLY_EXTRAS}. " if covered else ""
+
     settings_file = _claude_settings_file()
     if not settings_file.exists():
-        logger.warning(
-            "Claude Code hooks not installed (%s missing). Run: ccgram hook --install",
+        report(
+            "Claude Code hooks not installed (%s missing). %sRun: ccgram hook --install",
             settings_file,
+            suffix,
         )
         return
 
     try:
         settings = json.loads(settings_file.read_text())
     except json.JSONDecodeError, OSError:
-        logger.warning("Claude Code hooks not installed. Run: ccgram hook --install")
+        report(
+            "Claude Code hooks not installed. %sRun: ccgram hook --install",
+            suffix,
+        )
         return
 
     events = get_installed_events(settings)
     missing = [e for e, ok in events.items() if not ok]
     if missing:
-        logger.warning(
-            "Claude Code hooks incomplete — %d missing: %s. Run: ccgram hook --install",
+        report(
+            "Claude Code hooks incomplete — %d missing: %s. %sRun: ccgram hook --install",
             len(missing),
             ", ".join(missing),
+            suffix,
         )
 
 

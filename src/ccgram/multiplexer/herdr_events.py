@@ -52,6 +52,26 @@ def is_subscribed_sentinel(obj: Mapping[str, object]) -> bool:
     return bool(obj.get(_SUBSCRIBED_KEY))
 
 
+def _check_subscribe_ack(ack: bytes) -> None:
+    """Validate the ``events.subscribe`` ack line, raising ``OSError`` if it isn't one.
+
+    Split out of ``open_socket_stream`` to keep that generator's branching low;
+    see its call site for why a bad ack must raise rather than yield the sentinel.
+    """
+    if not ack:
+        raise OSError("herdr events.subscribe: connection closed before ack")
+    try:
+        payload = json.loads(ack)
+    except ValueError as exc:
+        raise OSError("herdr events.subscribe: non-JSON ack") from exc
+    if not isinstance(payload, dict):
+        raise OSError("herdr events.subscribe: unexpected ack shape")
+    if "error" in payload:
+        raise OSError(f"herdr events.subscribe rejected: {payload['error']}")
+    if "result" not in payload:
+        raise OSError("herdr events.subscribe: unexpected ack shape")
+
+
 async def open_socket_stream(
     socket_path: str, subscriptions: Sequence[Mapping[str, object]]
 ) -> AsyncIterator[dict]:
@@ -74,13 +94,13 @@ async def open_socket_stream(
         writer.write((request + "\n").encode())
         await writer.drain()
 
-        # First line is the subscription ack ({"result": …}) or an error payload.
-        ack = await reader.readline()
-        if ack:
-            with contextlib.suppress(ValueError):
-                payload = json.loads(ack)
-                if isinstance(payload, dict) and "error" in payload:
-                    logger.warning("herdr events.subscribe error: %s", payload["error"])
+        # First line is the subscription ack — herdr 0.7.5 sends
+        # {"id": "ccgram-events", "result": {"type": "subscription_started"}}
+        # (or {"id": …, "error": {…}}). A missing, rejected, or unintelligible
+        # ack must NOT look like a live subscription: raise so watch_events'
+        # reconnect backoff engages (the sentinel is what resets backoff)
+        # instead of hot-looping or sitting on a dead stream.
+        _check_subscribe_ack(await reader.readline())
         yield SUBSCRIBED
 
         while True:

@@ -76,9 +76,9 @@ __all__ = [
 logger = structlog.get_logger()
 
 # Supported herdr socket protocols (``herdr status`` → ``server.protocol``).
-# 14–16 are accepted without warnings. Other versions are attempted with a
+# 14–17 are accepted without warnings. Other versions are attempted with a
 # warning so ccgram remains usable across herdr upgrades and downgrades.
-HERDR_SUPPORTED_PROTOCOLS = frozenset({14, 15, 16})
+HERDR_SUPPORTED_PROTOCOLS = frozenset({14, 15, 16, 17})
 HERDR_PROTOCOL_VERSION = max(HERDR_SUPPORTED_PROTOCOLS)
 
 # Static capability declaration for the herdr backend (design Task 7).
@@ -101,12 +101,37 @@ _HERDR_CAPABILITIES = MultiplexerCapabilities(
 # worth watching, its spawned crew is not.
 _INTERNAL_LABEL_RE = re.compile(r"^(__.*__|fm-.*)$")
 
-# The send-keys path uses tmux key vocabulary ("Up"/"BSpace"/…); map the few
-# that differ to herdr's kitty-style names. Unmapped tokens pass through.
+# The send-keys path uses tmux key vocabulary ("Up"/"C-c"/"M-Enter"/…); herdr
+# validates every key before writing bytes and expects kitty-style lowercase
+# names, so one untranslated token drops the whole call. Named keys map via
+# the table; ``C-``/``M-`` prefixes map to ``ctrl+``/``alt+``. Unknown tokens
+# (plain characters, already-native names) pass through.
 _KEY_ALIASES: Mapping[str, str] = {
-    "BSpace": "Backspace",
+    "BSpace": "backspace",
     "Space": "space",
+    "Escape": "esc",
+    "Enter": "enter",
+    "Tab": "tab",
+    "BTab": "shift+tab",
+    "Up": "up",
+    "Down": "down",
+    "Left": "left",
+    "Right": "right",
 }
+
+
+def _translate_key(token: str) -> str:
+    """Map one tmux key token to herdr's kitty-style name."""
+    if token in _KEY_ALIASES:
+        return _KEY_ALIASES[token]
+    rest = token[2:]
+    if rest and token[1] == "-" and token[0] in ("C", "M"):
+        mod = "ctrl" if token[0] == "C" else "alt"
+        return (
+            f"{mod}+{_KEY_ALIASES.get(rest, rest.lower() if len(rest) > 1 else rest)}"
+        )
+    return token
+
 
 # Runner contract: ``(returncode, stdout, stderr)``. Injectable for tests.
 HerdrRunner = Callable[[Sequence[str]], "Awaitable[tuple[int, str, str]]"]
@@ -120,6 +145,10 @@ HerdrStreamOpener = Callable[[Sequence[Mapping[str, object]]], "AsyncIterator[di
 _RC_TIMEOUT = 124
 _RC_NO_BINARY = 127
 _CALL_TIMEOUT_SECONDS = 8.0
+
+# ``herdr`` CLI exit code for an unrecognized subcommand (older server without
+# workspace addressing) — distinct from a transient/socket failure.
+_RC_UNSUPPORTED_COMMAND = 2
 
 # Event-stream reconnect backoff (seconds): exponential, capped.
 _STREAM_BACKOFF_BASE = 1.0
@@ -138,6 +167,25 @@ def _pane_index(pane_id: str) -> int:
     """Parse the integer pane number from a herdr ``wN:pM`` id (``M``)."""
     _, sep, num = pane_id.rpartition(":p")
     return int(num) if sep and num.isdigit() else 0
+
+
+def _status_from_pane(pane: dict | None) -> AgentStatus | None:
+    """Parse a ``pane get``/``pane list`` dict into an ``AgentStatus``.
+
+    Shared by ``agent_status`` and the ``watch_events`` reprime — both read the
+    same ``agent_status``/``agent``/``custom_status`` triple from a pane dict.
+    Returns None when *pane* is None or carries no (non-empty) status string.
+    """
+    if pane is None:
+        return None
+    state = (pane.get("agent_status") or "").strip()
+    if not state:
+        return None
+    return AgentStatus(
+        state=state,
+        agent=(pane.get("agent") or "").strip(),
+        custom_status=(pane.get("custom_status") or "").strip(),
+    )
 
 
 class HerdrManager:
@@ -179,6 +227,7 @@ class HerdrManager:
         self._binary = shutil.which(binary) or binary
         self._run: HerdrRunner = runner or self._subprocess_run
         self._open_stream: HerdrStreamOpener = stream_opener or self._default_stream
+        self._stream_warned = False
 
     def _default_stream(
         self, subscriptions: Sequence[Mapping[str, object]]
@@ -286,6 +335,21 @@ class HerdrManager:
             return []
         return [p for p in pane_result.get("panes", []) if p.get("tab_id") == tab_id]
 
+    async def _pane_in_tab(self, pane_id: str, tab_id: str) -> bool:
+        """True when *pane_id* belongs to *tab_id* (containment guard).
+
+        Uses ``pane get`` (one pane) rather than ``pane list`` (every pane)
+        — this guard runs per non-active sibling pane per poll tick
+        (``polling_state._classify_non_active``), so the full listing is the
+        most expensive call available for a single-pane containment check.
+        Fails closed exactly like the ``_panes_for_tab`` shape: a gone/
+        unavailable pane is not proven to be in the tab, so it is rejected.
+        """
+        pane = await self._pane_get(pane_id)
+        if pane is None:
+            return False
+        return pane.get("tab_id") == tab_id
+
     async def _active_pane(self, tab_id: str) -> str | None:
         """Resolve a tab id to its active pane id.
 
@@ -300,11 +364,20 @@ class HerdrManager:
         return chosen.get("pane_id") or None
 
     async def _tab_list(self) -> list[dict] | None:
-        """Return raw tab dicts, or None when ``tab list`` is unavailable."""
+        """Return raw tab dicts, or None when ``tab list`` is unavailable.
+
+        An unintelligible result (missing/renamed ``tabs`` key — e.g. an
+        unverified protocol whose shape drifted) is also None: reconciliation
+        must see "listing unavailable", never an affirmative "zero tabs".
+        """
         result = await self._call_json(["tab", "list"])
         if result is None:
             return None
-        return [t for t in result.get("tabs", []) if t.get("tab_id")]
+        tabs = result.get("tabs")
+        if not isinstance(tabs, list):
+            logger.debug("herdr tab list returned unexpected shape")
+            return None
+        return [t for t in tabs if isinstance(t, dict) and t.get("tab_id")]
 
     async def _tab_get(self, tab_id: str) -> dict | None:
         """Return the raw tab dict from ``tab get <tab_id>``; None when gone."""
@@ -316,19 +389,36 @@ class HerdrManager:
         tab = result.get("tab")
         return tab if isinstance(tab, dict) else None
 
-    async def _workspace_labels(self) -> dict[str, str]:
+    async def _workspace_labels(self) -> dict[str, str] | None:
         """Map every ``workspace_id`` → its label (one ``workspace list`` call).
 
-        Empty when herdr exposes no workspace addressing (older server) — the
-        adaptive label then degrades to the agent name alone.
+        ``{}`` only when the command is unsupported (older server, CLI exit 2 —
+        the adaptive label degrades to the agent name alone) or the list is
+        genuinely empty. ``None`` on transient failure (socket down, timeout,
+        error payload, drifted shape) so reconciliation reports "unavailable"
+        instead of silently dropping the ``__*__`` workspace protection and
+        churning every topic title.
         """
-        result = await self._call_json(["workspace", "list"])
-        if not result:
+        rc, out, err = await self._run(["workspace", "list"])
+        if rc == _RC_UNSUPPORTED_COMMAND:
             return {}
+        if rc != 0:
+            logger.debug("herdr workspace list failed", rc=rc, err=err.strip())
+            return None
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError, ValueError:
+            return None
+        if not isinstance(payload, dict) or "error" in payload:
+            return None
+        result = payload.get("result")
+        workspaces = result.get("workspaces") if isinstance(result, dict) else None
+        if not isinstance(workspaces, list):
+            return None
         return {
             w.get("workspace_id", ""): w.get("label", "")
-            for w in result.get("workspaces", [])
-            if w.get("workspace_id")
+            for w in workspaces
+            if isinstance(w, dict) and w.get("workspace_id")
         }
 
     @staticmethod
@@ -337,6 +427,8 @@ class HerdrManager:
         window_name: str,
         cwd: str,
         agent: str,
+        *,
+        internal: bool = False,
     ) -> WindowRef:
         """Build a neutral ``WindowRef`` from resolved tab fields.
 
@@ -346,12 +438,14 @@ class HerdrManager:
         ``pane_current_command`` carries the representative agent label so
         provider detection and the status pipeline keep working.
         herdr has no tty and dimensions come from ``pane_dims`` on demand.
+        ``internal`` marks backend-internal ``__*__``/``fm-*`` tabs (Task 1).
         """
         return WindowRef(
             window_id=tab_id,
             window_name=window_name or agent,
             cwd=cwd,
             pane_current_command=agent,
+            internal=internal,
         )
 
     # ── Multiplexer Protocol surface ───────────────────────────────────
@@ -393,30 +487,42 @@ class HerdrManager:
                 supported_protocols=sorted(HERDR_SUPPORTED_PROTOCOLS),
                 cli_server_compatible=cli_server_compatible,
             )
+        if not self._socket_path:
+            # The CLI resolves its own default socket, but the push event
+            # stream connects directly — adopt the server-reported path so
+            # "leave $HERDR_SOCKET_PATH unset" works for the stream too.
+            sock = server.get("socket")
+            if isinstance(sock, str) and sock:
+                self._socket_path = sock
 
     @staticmethod
     def _representative_pane(tab_panes: list[dict], tab_cwd: str) -> tuple[str, str]:
         """Return ``(agent, cwd)`` for the representative pane in *tab_panes*.
 
-        Prefers the focused pane's agent; falls back to the first pane with a
-        non-empty agent. ``tab_cwd`` is the fallback when no pane has a cwd.
+        The focused pane is authoritative when present: its empty agent stays
+        empty (the pane dropped to a shell — sends route there via
+        ``_active_pane``, so the label must not borrow a neighbor's agent).
+        The first-non-empty fallback applies only when no pane is focused.
         """
         focused = next((p for p in tab_panes if p.get("focused")), None)
         if focused:
             agent = focused.get("display_agent") or focused.get("agent", "")
-            cwd = focused.get("cwd", "") or tab_cwd
-            if agent:
-                return agent, cwd
+            return agent, focused.get("cwd", "") or tab_cwd
         for pane in tab_panes:
             candidate = pane.get("display_agent") or pane.get("agent", "")
             if candidate:
                 return candidate, pane.get("cwd", "") or tab_cwd
-        cwd = (focused or {}).get("cwd", "") or tab_cwd if focused else tab_cwd
-        return "", cwd
+        return "", tab_cwd
 
     async def list_windows(self) -> list[WindowRef]:
-        """List windows, degrading an unavailable herdr server to an empty list."""
-        return await self.list_windows_for_reconciliation() or []
+        """List discovery-eligible windows (internal labels filtered).
+
+        Degrades an unavailable herdr server to an empty list — user-facing
+        best-effort surface. Destructive consumers must use
+        ``list_windows_for_reconciliation`` instead.
+        """
+        refs = await self.list_windows_for_reconciliation()
+        return [r for r in refs or [] if not r.internal]
 
     async def list_windows_for_reconciliation(self) -> list[WindowRef] | None:
         """List one ``WindowRef`` per herdr tab with its adaptive topic label.
@@ -427,7 +533,9 @@ class HerdrManager:
         pane's ``agent``, else first non-empty.
 
         Tabs whose workspace or tab label matches ``__*__`` (e.g. ``__main__``)
-        are skipped so ccgram never auto-adopts itself.
+        or ``fm-*`` are marked ``internal=True`` instead of being skipped: this
+        listing is the liveness truth for destructive prune, so internal tabs
+        must stay visible here. ``list_windows`` applies the discovery filter.
 
         This is the single source driving topic discovery and display-name
         re-sync: a workspace/tab rename re-labels the bound topic on the next
@@ -439,6 +547,8 @@ class HerdrManager:
         if not tabs:
             return []
         workspace_labels = await self._workspace_labels()
+        if workspace_labels is None:
+            return None
 
         # Build per-tab pane index from pane list (tab_id → list[pane]).
         pane_result = await self._call_json(["pane", "list"])
@@ -455,18 +565,25 @@ class HerdrManager:
             tab_label = tab.get("label", "")
             workspace_label = workspace_labels.get(tab.get("workspace_id", ""), "")
 
-            # Skip __*__ workspace or tab labels.
-            if _INTERNAL_LABEL_RE.match(workspace_label) or _INTERNAL_LABEL_RE.match(
-                tab_label
-            ):
-                continue
+            # Mark __*__ / fm-* workspace or tab labels as internal instead of
+            # skipping: this listing is the liveness truth for destructive
+            # prune, so internal tabs must stay visible here. ``list_windows``
+            # applies the actual discovery filter.
+            internal = bool(
+                _INTERNAL_LABEL_RE.match(workspace_label)
+                or _INTERNAL_LABEL_RE.match(tab_label)
+            )
 
             tab_panes = panes_by_tab.get(tab_id, [])
             rep_agent, rep_cwd = self._representative_pane(
                 tab_panes, tab.get("cwd", "")
             )
             window_name = format_agent_topic_prefix(workspace_label, tab_label)
-            refs.append(self._to_window_ref(tab_id, window_name, rep_cwd, rep_agent))
+            refs.append(
+                self._to_window_ref(
+                    tab_id, window_name, rep_cwd, rep_agent, internal=internal
+                )
+            )
         return refs
 
     async def find_window_by_id(self, window_id: str) -> WindowRef | None:
@@ -483,8 +600,9 @@ class HerdrManager:
             return None
         tab_label = tab.get("label", "")
 
-        # Resolve workspace label for the full adaptive topic label.
-        workspace_labels = await self._workspace_labels()
+        # Resolve workspace label for the full adaptive topic label. Bound-window
+        # resolution must not fail over labels, so None degrades to {}.
+        workspace_labels = await self._workspace_labels() or {}
         workspace_label = workspace_labels.get(tab.get("workspace_id", ""), "")
         window_name = format_agent_topic_prefix(workspace_label, tab_label)
 
@@ -645,23 +763,30 @@ class HerdrManager:
         *,
         enter: bool = True,
         literal: bool = True,
-        window_id: str | None = None,  # noqa: ARG002 — protocol signature
+        window_id: str | None = None,
     ) -> bool:
         """Send to a specific pane id directly (no tab resolution).
 
         Unlike ``send``, *pane_id* here is a real herdr pane id (e.g.
         ``"w2:p1"``), not a tab id — callers that target a specific pane in a
-        split tab pass the pane id directly.
+        split tab pass the pane id directly. When *window_id* is given, the
+        pane must belong to that tab (cross-window access prevention); the
+        call is rejected otherwise.
         """
+        if window_id is not None and not await self._pane_in_tab(pane_id, window_id):
+            logger.debug(
+                "send_to_pane rejected: pane %s not in window %s", pane_id, window_id
+            )
+            return False
         return await self._send_to(pane_id, text, enter=enter, literal=literal)
 
     async def _send_to(
         self, pane_id: str, text: str, *, enter: bool, literal: bool
     ) -> bool:
         if not literal:
-            keys = [_KEY_ALIASES.get(tok, tok) for tok in text.split() if tok]
+            keys = [_translate_key(tok) for tok in text.split() if tok]
             if enter:
-                keys.append("Enter")
+                keys.append("enter")
             if not keys:
                 return False
             return await self._call_ok(["pane", "send-keys", pane_id, *keys])
@@ -967,16 +1092,7 @@ class HerdrManager:
         if pane_id is None:
             return None
         pane = await self._pane_get(pane_id)
-        if pane is None:
-            return None
-        state = (pane.get("agent_status") or "").strip()
-        if not state:
-            return None
-        return AgentStatus(
-            state=state,
-            agent=(pane.get("agent") or "").strip(),
-            custom_status=(pane.get("custom_status") or "").strip(),
-        )
+        return _status_from_pane(pane)
 
     async def agent_session(self, window_id: str) -> AgentSessionRef | None:
         """Native agent session pointer for the active pane in a tab.
@@ -1069,21 +1185,52 @@ class HerdrManager:
                         # isn't cold; events during reprime are buffered + read
                         # on the next iterations (no reprime-vs-subscribe race).
                         backoff = _STREAM_BACKOFF_BASE
+                        self._stream_warned = False
+                        primed: set[str] = set()
                         for pane_id, window_id in pane_to_window.items():
-                            status = await self.agent_status(window_id)
-                            if status is not None:
+                            primed.add(window_id)
+                            pane = await self._pane_get(pane_id)
+                            if pane is None:
+                                # The read failed (timeout, socket hiccup) — the
+                                # agent state is unknown, not absent. Evicting
+                                # keeps the consumer's fallback lookup alive.
                                 yield MuxEvent(
-                                    kind="agent_status",
+                                    kind="agent_status_unknown",
                                     window_id=window_id,
                                     pane_id=pane_id,
-                                    status=status,
+                                )
+                                continue
+                            # status=None is the negative marker: the pane was
+                            # read and runs no agent, so a stale cached "working"
+                            # must not outlive the reconnect.
+                            yield MuxEvent(
+                                kind="agent_status",
+                                window_id=window_id,
+                                pane_id=pane_id,
+                                status=_status_from_pane(pane),
+                            )
+                        for window_id in ids:
+                            if window_id not in primed:
+                                # No pane resolved (tab gone, or ``pane list``
+                                # failed) and nothing to subscribe to, so no push
+                                # can correct this window: evict, never mark.
+                                yield MuxEvent(
+                                    kind="agent_status_unknown",
+                                    window_id=window_id,
+                                    pane_id="",
                                 )
                         continue
                     event = translate_event(obj, pane_to_window)
                     if event is not None:
                         yield event
             except OSError as exc:
-                logger.debug("herdr event stream error: %s", exc)
+                if not self._stream_warned:
+                    logger.warning(
+                        "herdr event stream unavailable (will keep retrying): %s", exc
+                    )
+                    self._stream_warned = True
+                else:
+                    logger.debug("herdr event stream error: %s", exc)
             # Clean EOF or socket error → back off, then reconnect with the full
             # set (incremental subscribe is unsupported) and reprime.
             await asyncio.sleep(backoff)
@@ -1095,14 +1242,23 @@ class HerdrManager:
         pane_id: str,
         *,
         with_ansi: bool = False,
-        window_id: str | None = None,  # noqa: ARG002 — protocol signature
+        window_id: str | None = None,
     ) -> str | None:
         """Capture a specific pane's visible text by pane id (no tab resolution).
 
         *pane_id* is a real herdr pane id (e.g. ``"w2:p1"``). Reads directly
         without resolving through a tab so callers that target a specific pane
-        in a split tab get the right pane, not the active one.
+        in a split tab get the right pane, not the active one. Parity with
+        tmux: when *window_id* is given, validate the pane belongs to that
+        window before capture; returns ``None`` otherwise.
         """
+        if window_id is not None and not await self._pane_in_tab(pane_id, window_id):
+            logger.debug(
+                "capture_pane_by_id rejected: pane %s not in window %s",
+                pane_id,
+                window_id,
+            )
+            return None
         return await self._read_visible_pane(pane_id, ansi=with_ansi)
 
     async def capture_pane_scrollback(

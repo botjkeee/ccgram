@@ -253,6 +253,30 @@ class ClaudeProvider:
     ) -> SessionStartEvent | None:
         return None  # Claude uses hooks, not transcript discovery
 
+    def transcript_for_session_id(self, session_id: str, cwd: str) -> str | None:
+        """Resolve a Claude session id under ``~/.claude/projects/``.
+
+        Mirrors ``SessionResolver._build_session_file_path`` (cwd encoded with
+        ``/`` → ``-``) and falls back to a glob when the window's recorded cwd
+        has drifted from the one the transcript was filed under.
+        """
+        # Lazy: config pulls the env/.env layer, which the hook-side importers
+        # of this module must not drag in.
+        from ccgram.config import config
+
+        if not session_id:
+            return None
+        if cwd:
+            direct = (
+                config.claude_projects_path
+                / cwd.replace("/", "-")
+                / f"{session_id}.jsonl"
+            )
+            if direct.exists():
+                return str(direct)
+        matches = list(config.claude_projects_path.glob(f"*/{session_id}.jsonl"))
+        return str(matches[0]) if matches else None
+
     def discover_commands(self, base_dir: str) -> list[DiscoveredCommand]:
         _ = base_dir
         return [
