@@ -1614,10 +1614,28 @@ async def test_send_to_pane_bypasses_tab_resolution() -> None:
     assert fake.sent("pane", "list") is None  # no resolution
 
 
+def _pane_get_json(pane_id: str, tab_id: str) -> str:
+    """Build a ``pane get`` envelope for the containment guard (Finding 2).
+
+    ``_pane_in_tab`` now resolves via ``pane get <pane_id>`` (one pane)
+    instead of ``pane list`` (every pane) — cheaper per-tick for the
+    non-active-sibling-pane guard.
+    """
+    return json.dumps(
+        {
+            "id": "cli:pane:get",
+            "result": {
+                "pane": {"pane_id": pane_id, "tab_id": tab_id},
+                "type": "pane_info",
+            },
+        }
+    )
+
+
 async def test_send_to_pane_rejects_pane_outside_window() -> None:
     fake = (
         FakeHerdr()
-        .on("pane", "list", out=PANE_LIST)  # w1:p1 in w1:t1, w2:p2 in w2:t2
+        .on("pane", "get", "w1:p1", out=_pane_get_json("w1:p1", "w1:t1"))
         .on("pane", "send-text", out="")
     )
     ok = await _manager(fake).send_to_pane(
@@ -1629,7 +1647,9 @@ async def test_send_to_pane_rejects_pane_outside_window() -> None:
 
 async def test_capture_pane_by_id_rejects_pane_outside_window() -> None:
     fake = (
-        FakeHerdr().on("pane", "list", out=PANE_LIST).on("pane", "read", out="secret")
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", out=_pane_get_json("w1:p1", "w1:t1"))
+        .on("pane", "read", out="secret")
     )
     text = await _manager(fake).capture_pane_by_id("w1:p1", window_id="w2:t2")
     assert text is None
@@ -1637,19 +1657,24 @@ async def test_capture_pane_by_id_rejects_pane_outside_window() -> None:
 
 
 async def test_send_to_pane_allows_pane_inside_window() -> None:
-    fake = FakeHerdr().on("pane", "list", out=PANE_LIST).on("pane", "send-text", out="")
+    fake = (
+        FakeHerdr()
+        .on("pane", "get", "w1:p1", out=_pane_get_json("w1:p1", "w1:t1"))
+        .on("pane", "send-text", out="")
+    )
     assert (
         await _manager(fake).send_to_pane("w1:p1", "hi", enter=False, window_id="w1:t1")
         is True
     )
+    assert fake.sent("pane", "list") is None  # one-pane call, not a full listing
 
 
 async def test_send_to_pane_fails_closed_when_pane_list_unavailable() -> None:
-    # pane list unavailable (socket down / bad exit) → containment can't be
+    # pane get unavailable (socket down / bad exit) → containment can't be
     # proven, so a guarded send_to_pane must reject rather than allow.
     fake = (
         FakeHerdr()
-        .on("pane", "list", rc=127, err="connection refused")
+        .on("pane", "get", "w1:p1", rc=127, err="connection refused")
         .on("pane", "send-text", out="")
     )
     ok = await _manager(fake).send_to_pane(
@@ -1662,7 +1687,7 @@ async def test_send_to_pane_fails_closed_when_pane_list_unavailable() -> None:
 async def test_capture_pane_by_id_fails_closed_when_pane_list_unavailable() -> None:
     fake = (
         FakeHerdr()
-        .on("pane", "list", rc=127, err="connection refused")
+        .on("pane", "get", "w1:p1", rc=127, err="connection refused")
         .on("pane", "read", out="secret")
     )
     text = await _manager(fake).capture_pane_by_id("w1:p1", window_id="w1:t1")

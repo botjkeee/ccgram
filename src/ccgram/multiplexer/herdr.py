@@ -336,9 +336,19 @@ class HerdrManager:
         return [p for p in pane_result.get("panes", []) if p.get("tab_id") == tab_id]
 
     async def _pane_in_tab(self, pane_id: str, tab_id: str) -> bool:
-        """True when *pane_id* belongs to *tab_id* (containment guard)."""
-        panes = await self._panes_for_tab(tab_id)
-        return any(p.get("pane_id") == pane_id for p in panes)
+        """True when *pane_id* belongs to *tab_id* (containment guard).
+
+        Uses ``pane get`` (one pane) rather than ``pane list`` (every pane)
+        — this guard runs per non-active sibling pane per poll tick
+        (``polling_state._classify_non_active``), so the full listing is the
+        most expensive call available for a single-pane containment check.
+        Fails closed exactly like the ``_panes_for_tab`` shape: a gone/
+        unavailable pane is not proven to be in the tab, so it is rejected.
+        """
+        pane = await self._pane_get(pane_id)
+        if pane is None:
+            return False
+        return pane.get("tab_id") == tab_id
 
     async def _active_pane(self, tab_id: str) -> str | None:
         """Resolve a tab id to its active pane id.
