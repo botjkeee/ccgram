@@ -316,7 +316,7 @@ Creating sessions from the terminal on herdr is covered in [Creating Sessions fr
 
 > **Workspace picker:** On herdr, `/new` shows an extra step after directory selection — a workspace picker that lets you pin the new tab inside an existing herdr workspace. If no workspaces exist yet (or none matches the selected directory), the picker is skipped and ccgram creates a new workspace automatically.
 >
-> **Self-hosting escape hatch:** Workspaces or tabs whose label matches `__*__` (e.g. `__main__`) are invisible to ccgram. Use this naming convention to run ccgram itself inside herdr without it auto-adopting its own terminal as a topic.
+> **Self-hosting escape hatch:** Workspaces or tabs whose label matches `__*__` (e.g. `__main__`) or `fm-*` (FirstMate crewmate tabs) are invisible to ccgram as topics. Use this naming convention to run ccgram itself inside herdr without it auto-adopting its own terminal as a topic.
 
 ## Auto-Close Behavior
 
