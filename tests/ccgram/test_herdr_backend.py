@@ -1614,6 +1614,36 @@ async def test_send_to_pane_bypasses_tab_resolution() -> None:
     assert fake.sent("pane", "list") is None  # no resolution
 
 
+async def test_send_to_pane_rejects_pane_outside_window() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST)  # w1:p1 in w1:t1, w2:p2 in w2:t2
+        .on("pane", "send-text", out="")
+    )
+    ok = await _manager(fake).send_to_pane(
+        "w1:p1", "hi", enter=False, window_id="w2:t2"
+    )
+    assert ok is False
+    assert fake.sent("pane", "send-text") is None  # nothing was delivered
+
+
+async def test_capture_pane_by_id_rejects_pane_outside_window() -> None:
+    fake = (
+        FakeHerdr().on("pane", "list", out=PANE_LIST).on("pane", "read", out="secret")
+    )
+    text = await _manager(fake).capture_pane_by_id("w1:p1", window_id="w2:t2")
+    assert text is None
+    assert fake.sent("pane", "read") is None
+
+
+async def test_send_to_pane_allows_pane_inside_window() -> None:
+    fake = FakeHerdr().on("pane", "list", out=PANE_LIST).on("pane", "send-text", out="")
+    assert (
+        await _manager(fake).send_to_pane("w1:p1", "hi", enter=False, window_id="w1:t1")
+        is True
+    )
+
+
 # ── Boundary: socket down, bad id, protocol ────────────────────────────
 
 

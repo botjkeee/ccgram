@@ -334,6 +334,11 @@ class HerdrManager:
             return []
         return [p for p in pane_result.get("panes", []) if p.get("tab_id") == tab_id]
 
+    async def _pane_in_tab(self, pane_id: str, tab_id: str) -> bool:
+        """True when *pane_id* belongs to *tab_id* (containment guard)."""
+        panes = await self._panes_for_tab(tab_id)
+        return any(p.get("pane_id") == pane_id for p in panes)
+
     async def _active_pane(self, tab_id: str) -> str | None:
         """Resolve a tab id to its active pane id.
 
@@ -740,14 +745,21 @@ class HerdrManager:
         *,
         enter: bool = True,
         literal: bool = True,
-        window_id: str | None = None,  # noqa: ARG002 — protocol signature
+        window_id: str | None = None,
     ) -> bool:
         """Send to a specific pane id directly (no tab resolution).
 
         Unlike ``send``, *pane_id* here is a real herdr pane id (e.g.
         ``"w2:p1"``), not a tab id — callers that target a specific pane in a
-        split tab pass the pane id directly.
+        split tab pass the pane id directly. When *window_id* is given, the
+        pane must belong to that tab (cross-window access prevention); the
+        call is rejected otherwise.
         """
+        if window_id is not None and not await self._pane_in_tab(pane_id, window_id):
+            logger.debug(
+                "send_to_pane rejected: pane %s not in window %s", pane_id, window_id
+            )
+            return False
         return await self._send_to(pane_id, text, enter=enter, literal=literal)
 
     async def _send_to(
@@ -1192,14 +1204,23 @@ class HerdrManager:
         pane_id: str,
         *,
         with_ansi: bool = False,
-        window_id: str | None = None,  # noqa: ARG002 — protocol signature
+        window_id: str | None = None,
     ) -> str | None:
         """Capture a specific pane's visible text by pane id (no tab resolution).
 
         *pane_id* is a real herdr pane id (e.g. ``"w2:p1"``). Reads directly
         without resolving through a tab so callers that target a specific pane
-        in a split tab get the right pane, not the active one.
+        in a split tab get the right pane, not the active one. Parity with
+        tmux: when *window_id* is given, validate the pane belongs to that
+        window before capture; returns ``None`` otherwise.
         """
+        if window_id is not None and not await self._pane_in_tab(pane_id, window_id):
+            logger.debug(
+                "capture_pane_by_id rejected: pane %s not in window %s",
+                pane_id,
+                window_id,
+            )
+            return None
         return await self._read_visible_pane(pane_id, ansi=with_ansi)
 
     async def capture_pane_scrollback(
