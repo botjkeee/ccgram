@@ -1644,6 +1644,32 @@ async def test_send_to_pane_allows_pane_inside_window() -> None:
     )
 
 
+async def test_send_to_pane_fails_closed_when_pane_list_unavailable() -> None:
+    # pane list unavailable (socket down / bad exit) → containment can't be
+    # proven, so a guarded send_to_pane must reject rather than allow.
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", rc=127, err="connection refused")
+        .on("pane", "send-text", out="")
+    )
+    ok = await _manager(fake).send_to_pane(
+        "w1:p1", "hi", enter=False, window_id="w1:t1"
+    )
+    assert ok is False
+    assert fake.sent("pane", "send-text") is None  # nothing was delivered
+
+
+async def test_capture_pane_by_id_fails_closed_when_pane_list_unavailable() -> None:
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", rc=127, err="connection refused")
+        .on("pane", "read", out="secret")
+    )
+    text = await _manager(fake).capture_pane_by_id("w1:p1", window_id="w1:t1")
+    assert text is None
+    assert fake.sent("pane", "read") is None  # nothing was read
+
+
 # ── Boundary: socket down, bad id, protocol ────────────────────────────
 
 
