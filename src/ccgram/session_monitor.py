@@ -180,7 +180,11 @@ class SessionMonitor:
 
         if fallback_session_ids:
             active_cwds = await self._get_active_cwds()
-            sessions = self._scan_projects_sync(active_cwds) if active_cwds else []
+            sessions = (
+                await asyncio.to_thread(self._scan_projects_sync, active_cwds)
+                if active_cwds
+                else []
+            )
             for session_info in sessions:
                 if session_info.session_id not in fallback_session_ids:
                     continue

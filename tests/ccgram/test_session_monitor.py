@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -929,6 +930,27 @@ class TestCheckForUpdates:
         assert len(msgs) == 1
         assert msgs[0].session_id == "sess-d"
         assert "hello" in msgs[0].text
+
+    async def test_fallback_scan_runs_off_event_loop(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        seen_threads: list = []
+
+        def fake_scan(active_cwds):
+            seen_threads.append(threading.current_thread())
+            return []
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        monkeypatch.setattr(monitor, "_scan_projects_sync", fake_scan)
+        monkeypatch.setattr(monitor, "_get_active_cwds", AsyncMock(return_value={"/x"}))
+        current = {"w1:t1": {"session_id": "sid", "transcript_path": "/nope"}}
+        await monitor.check_for_updates(current)
+        # asyncio_mode="auto" runs the loop on the main thread, so this is a
+        # valid off-loop assertion.
+        assert seen_threads and seen_threads[0] is not threading.main_thread()
 
 
 class TestCheckForUpdatesExceptionResilience:
