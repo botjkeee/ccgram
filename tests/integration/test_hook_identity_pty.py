@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 
 
@@ -40,14 +42,20 @@ def test_detached_hook_resolves_herdr_identity_under_stale_tmux(tmp_path) -> Non
         "print(json.dumps({'mux': identity.mux if identity else None}))\n"
     )
     controller, follower = pty.openpty()
-    # sh stands in for the agent (stdin = pane pty); it spawns the probe via
-    # setsid — detached, piped stdio — exactly like Claude Code spawns hooks.
-    proc = subprocess.run(
-        ["sh", "-c", f"setsid {sys.executable} {probe}"],
-        stdin=follower,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    os.close(controller), os.close(follower)
+    try:
+        # sh stands in for the agent (stdin = pane pty); it spawns the probe
+        # via setsid — detached, piped stdio — exactly like Claude Code
+        # spawns hooks. Bounded well under the global pytest-timeout (30s)
+        # so a hang surfaces as this assertion, not a timeout race.
+        proc = subprocess.run(
+            ["sh", "-c", f"setsid {sys.executable} {probe}"],
+            stdin=follower,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        os.close(controller)
+        os.close(follower)
+    assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"mux": "herdr"}
