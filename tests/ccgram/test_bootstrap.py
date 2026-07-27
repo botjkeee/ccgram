@@ -1,3 +1,5 @@
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -303,3 +305,137 @@ class TestVerifyHooksInstalled:
 
         logger.info.assert_not_called()
         logger.warning.assert_not_called()
+
+    @staticmethod
+    def _claude_provider() -> MagicMock:
+        provider = MagicMock()
+        provider.capabilities.supports_hook = True
+        provider.capabilities.name = "claude"
+        return provider
+
+    @staticmethod
+    def _mux(*, native_agent_session: bool, supports_event_stream: bool):
+        """Stub for the ``multiplexer`` module binding in ``bootstrap``.
+
+        The real proxy has ``__slots__ = ()`` and forwards via ``__getattr__``,
+        so its attributes cannot be patched — the whole binding is rebound
+        instead (same idiom as the transcript-discovery tests).
+        """
+        return SimpleNamespace(
+            capabilities=SimpleNamespace(
+                native_agent_session=native_agent_session,
+                supports_event_stream=supports_event_stream,
+            )
+        )
+
+    def test_native_session_backend_downgrades_missing_hooks_to_debug(self, tmp_path):
+        """On herdr the hooks add Claude-only extras, not a working baseline.
+
+        Session binding, agent status and window death all come from the
+        multiplexer there, so a WARNING listing every missing hook at each
+        startup reports a degraded state that does not exist. Mirrors the
+        DEBUG treatment codex/gemini already get in this same function.
+        """
+        missing = tmp_path / "missing.json"
+
+        with (
+            patch(
+                "ccgram.bootstrap.get_provider", return_value=self._claude_provider()
+            ),
+            patch("ccgram.bootstrap.logger") as logger,
+            patch("ccgram.hook._claude_settings_file", return_value=missing),
+            patch(
+                "ccgram.bootstrap.multiplexer",
+                self._mux(native_agent_session=True, supports_event_stream=True),
+            ),
+        ):
+            bootstrap.verify_hooks_installed()
+
+        logger.warning.assert_not_called()
+        logger.debug.assert_called_once()
+
+    def test_hookless_backend_still_warns(self, tmp_path):
+        """tmux has neither native sessions nor push events — behaviour unchanged."""
+        missing = tmp_path / "missing.json"
+
+        with (
+            patch(
+                "ccgram.bootstrap.get_provider", return_value=self._claude_provider()
+            ),
+            patch("ccgram.bootstrap.logger") as logger,
+            patch("ccgram.hook._claude_settings_file", return_value=missing),
+            patch(
+                "ccgram.bootstrap.multiplexer",
+                self._mux(native_agent_session=False, supports_event_stream=False),
+            ),
+        ):
+            bootstrap.verify_hooks_installed()
+
+        logger.warning.assert_called_once()
+
+    def test_partial_capability_backend_still_warns(self, tmp_path):
+        """Push events alone do not cover session binding — keep warning."""
+        missing = tmp_path / "missing.json"
+
+        with (
+            patch(
+                "ccgram.bootstrap.get_provider", return_value=self._claude_provider()
+            ),
+            patch("ccgram.bootstrap.logger") as logger,
+            patch("ccgram.hook._claude_settings_file", return_value=missing),
+            patch(
+                "ccgram.bootstrap.multiplexer",
+                self._mux(native_agent_session=False, supports_event_stream=True),
+            ),
+        ):
+            bootstrap.verify_hooks_installed()
+
+        logger.warning.assert_called_once()
+
+    def test_unwired_multiplexer_still_warns(self, tmp_path):
+        """A capability read that cannot resolve must not silence the warning."""
+        missing = tmp_path / "missing.json"
+
+        class _Unwired:
+            @property
+            def capabilities(self):
+                raise RuntimeError("Multiplexer not yet wired.")
+
+        with (
+            patch(
+                "ccgram.bootstrap.get_provider", return_value=self._claude_provider()
+            ),
+            patch("ccgram.bootstrap.logger") as logger,
+            patch("ccgram.hook._claude_settings_file", return_value=missing),
+            patch("ccgram.bootstrap.multiplexer", _Unwired()),
+        ):
+            bootstrap.verify_hooks_installed()
+
+        logger.warning.assert_called_once()
+
+    def test_incomplete_hooks_downgraded_on_native_session_backend(self, tmp_path):
+        """The real-world case: settings exist but ccgram's events are absent."""
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({"hooks": {}}))
+
+        with (
+            patch(
+                "ccgram.bootstrap.get_provider", return_value=self._claude_provider()
+            ),
+            patch("ccgram.bootstrap.logger") as logger,
+            patch("ccgram.hook._claude_settings_file", return_value=settings),
+            patch(
+                "ccgram.bootstrap.multiplexer",
+                self._mux(native_agent_session=True, supports_event_stream=True),
+            ),
+        ):
+            bootstrap.verify_hooks_installed()
+
+        logger.warning.assert_not_called()
+        logger.debug.assert_called_once()
+        # The message the operator actually reads must name what is lost,
+        # rather than only reporting "incomplete".
+        fmt, *args = logger.debug.call_args[0]
+        rendered = fmt % tuple(args)
+        assert "completion summary" in rendered
+        assert "subagent/teammate events" in rendered
