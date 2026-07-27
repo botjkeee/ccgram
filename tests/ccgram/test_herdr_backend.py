@@ -1749,9 +1749,21 @@ def test_translate_event_maps_and_filters() -> None:
         },
         p2w,
     ) == MuxEvent("agent_status", "w2:t1", "w2:p1", AgentStatus("working", "codex", ""))
+    # underscore form of the agent-status event name is also matched.
+    assert translate_event(
+        {
+            "event": "pane_agent_status_changed",
+            "data": {"pane_id": "w2:p1", "agent_status": "working", "agent": "codex"},
+        },
+        p2w,
+    ) == MuxEvent("agent_status", "w2:t1", "w2:p1", AgentStatus("working", "codex", ""))
     # tab closed for a watched tab → window_died (no pane_id).
     assert translate_event(
         {"event": "tab_closed", "data": {"tab_id": "w2:t1"}}, p2w
+    ) == MuxEvent("window_died", "w2:t1")
+    # dot form of the tab-closed event name is also matched.
+    assert translate_event(
+        {"event": "tab.closed", "data": {"tab_id": "w2:t1"}}, p2w
     ) == MuxEvent("window_died", "w2:t1")
     # pane.exited is NOT a death signal (would falsely kill multi-pane tabs).
     assert (
