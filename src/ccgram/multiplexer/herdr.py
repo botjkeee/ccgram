@@ -227,6 +227,7 @@ class HerdrManager:
         self._binary = shutil.which(binary) or binary
         self._run: HerdrRunner = runner or self._subprocess_run
         self._open_stream: HerdrStreamOpener = stream_opener or self._default_stream
+        self._stream_warned = False
 
     def _default_stream(
         self, subscriptions: Sequence[Mapping[str, object]]
@@ -476,6 +477,13 @@ class HerdrManager:
                 supported_protocols=sorted(HERDR_SUPPORTED_PROTOCOLS),
                 cli_server_compatible=cli_server_compatible,
             )
+        if not self._socket_path:
+            # The CLI resolves its own default socket, but the push event
+            # stream connects directly — adopt the server-reported path so
+            # "leave $HERDR_SOCKET_PATH unset" works for the stream too.
+            sock = server.get("socket")
+            if isinstance(sock, str) and sock:
+                self._socket_path = sock
 
     @staticmethod
     def _representative_pane(tab_panes: list[dict], tab_cwd: str) -> tuple[str, str]:
@@ -1167,6 +1175,7 @@ class HerdrManager:
                         # isn't cold; events during reprime are buffered + read
                         # on the next iterations (no reprime-vs-subscribe race).
                         backoff = _STREAM_BACKOFF_BASE
+                        self._stream_warned = False
                         primed: set[str] = set()
                         for pane_id, window_id in pane_to_window.items():
                             primed.add(window_id)
@@ -1192,7 +1201,13 @@ class HerdrManager:
                     if event is not None:
                         yield event
             except OSError as exc:
-                logger.debug("herdr event stream error: %s", exc)
+                if not self._stream_warned:
+                    logger.warning(
+                        "herdr event stream unavailable (will keep retrying): %s", exc
+                    )
+                    self._stream_warned = True
+                else:
+                    logger.debug("herdr event stream error: %s", exc)
             # Clean EOF or socket error → back off, then reconnect with the full
             # set (incremental subscribe is unsupported) and reprime.
             await asyncio.sleep(backoff)

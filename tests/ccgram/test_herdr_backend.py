@@ -1791,6 +1791,41 @@ async def test_ensure_session_raises_when_server_not_running() -> None:
         await _manager(fake).ensure_session()
 
 
+async def test_ensure_session_adopts_socket_from_status() -> None:
+    status = json.dumps(
+        {
+            "server": {
+                "running": True,
+                "protocol": 17,
+                "compatible": True,
+                "socket": "/run/herdr/herdr.sock",
+            }
+        }
+    )
+    fake = FakeHerdr().on("status", "--json", out=status)
+    mgr = HerdrManager(socket_path=None, runner=fake)
+    mgr._socket_path = ""  # simulate unset env regardless of test environment
+    await mgr.ensure_session()
+    assert mgr._socket_path == "/run/herdr/herdr.sock"
+
+
+async def test_ensure_session_keeps_explicit_socket() -> None:
+    status = json.dumps(
+        {
+            "server": {
+                "running": True,
+                "protocol": 17,
+                "compatible": True,
+                "socket": "/run/other.sock",
+            }
+        }
+    )
+    fake = FakeHerdr().on("status", "--json", out=status)
+    mgr = HerdrManager(socket_path="/tmp/mine.sock", runner=fake)
+    await mgr.ensure_session()
+    assert mgr._socket_path == "/tmp/mine.sock"
+
+
 # ── Event stream: translate_event + watch_events ──────────────────────
 
 
@@ -2097,6 +2132,50 @@ async def test_watch_events_reconnects_after_stream_drops(monkeypatch) -> None:
         ("agent_status", "done"),
     ]
     assert len(opener.seen) >= 2  # type: ignore[attr-defined]  # reconnected
+
+
+async def test_stream_connect_failure_warns_once_then_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First stream failure is a WARNING, repeats are debug, success resets."""
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(herdr_module.asyncio, "sleep", fake_sleep)
+
+    warnings: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        herdr_module.logger,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
+    )
+
+    calls = {"n": 0}
+
+    async def opener(subscriptions):
+        n = calls["n"]
+        calls["n"] += 1
+        if n in (0, 1, 3):
+            raise OSError(f"boom{n}")
+        yield SUBSCRIBED
+
+    fake = FakeHerdr().on("pane", "list", out=json.dumps({"result": {"panes": []}}))
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    agen = mgr.watch_events(["w2:t1"])
+    try:
+        # connect0 fails (warn), connect1 fails (debug), connect2 succeeds and
+        # reprimes — the first yielded event surfaces after all three connects.
+        await anext(agen)
+        assert len(warnings) == 1
+
+        # connect2's stream ends → reconnect: connect3 fails (warn again, since
+        # the successful subscribe above reset the flag), connect4 succeeds.
+        await anext(agen)
+        assert len(warnings) == 2
+    finally:
+        await agen.aclose()
 
 
 def _labelled_listing(tab_label: str, ws_label: str) -> FakeHerdr:
