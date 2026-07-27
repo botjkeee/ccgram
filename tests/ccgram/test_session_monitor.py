@@ -4,7 +4,7 @@ import json
 import os
 import threading
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -272,6 +272,41 @@ class TestAdoptionDiscoveryGate:
         await monitor._detect_and_cleanup_changes(discovery_windows=discovery_windows)
         assert len(events) == 1
         assert events[0].window_id == "w9:t1"
+
+    async def test_gated_window_still_seeds_provider_for_retry(
+        self, monitor: SessionMonitor, monkeypatch
+    ) -> None:
+        """Provider write must not wait for the discovery gate (Finding 1).
+
+        ``reconcile`` reports a window in ``new_windows`` exactly once; a
+        window gated out here (multiplexer listing unavailable this cycle) is
+        retried later via ``_emit_known_unbound_window_events``, which does
+        NOT call ``set_window_provider`` — so the hook's authoritative
+        ``provider_name`` must be seeded here, ungated by the discovery gate,
+        or it is lost forever for this window.
+        """
+        from ccgram.session import session_manager
+
+        session_lifecycle.initialize({})
+        current = {
+            "w9:t1": {
+                "session_id": "sid-1",
+                "cwd": "/x",
+                "window_name": "",
+                "provider_name": "codex",
+            },
+        }
+        monkeypatch.setattr(
+            monitor, "_load_current_session_map", AsyncMock(return_value=current)
+        )
+        set_provider = Mock()
+        monkeypatch.setattr(session_manager, "set_window_provider", set_provider)
+
+        # Listing unavailable this cycle -> gate filters the window out of
+        # adoption, but the provider write must still happen.
+        await monitor._detect_and_cleanup_changes(discovery_windows=[])
+
+        set_provider.assert_called_once_with("w9:t1", "codex")
 
 
 _TMUX_CAPS = MultiplexerCapabilities(

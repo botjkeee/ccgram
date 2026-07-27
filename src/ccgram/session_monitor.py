@@ -313,6 +313,24 @@ class SessionMonitor:
             if not thread_router.has_window(window_id):
                 adoption_windows[window_id] = details
 
+        if adoption_windows:
+            # Lazy: session.py imports session_monitor at top; hoisting
+            # session_manager forms a hard cycle on bootstrap.
+            from .session import session_manager as _sm
+
+            # Seed the provider from every adoption candidate, ungated: a
+            # window filtered out below (not yet discovery-eligible) is
+            # reported in ``new_windows`` exactly once by ``reconcile``, so
+            # if the write waited for the gate it would never run when the
+            # retry path (``_emit_known_unbound_window_events``) later
+            # creates the topic. The write is metadata only — it does not
+            # create a topic — so seeding it here for gated-out windows too
+            # is harmless.
+            for window_id, details in adoption_windows.items():
+                provider_name = details.get("provider_name", "")
+                if provider_name:
+                    _sm.set_window_provider(window_id, provider_name)
+
         if discovery_windows is not None:
             discovery_ids = {w.window_id for w in discovery_windows}
             adoption_windows = {
@@ -322,15 +340,7 @@ class SessionMonitor:
             }
 
         if adoption_windows:
-            # Lazy: session.py imports session_monitor at top; hoisting
-            # session_manager forms a hard cycle on bootstrap.
-            from .session import session_manager as _sm
-
             for window_id, details in adoption_windows.items():
-                provider_name = details.get("provider_name", "")
-                if provider_name:
-                    _sm.set_window_provider(window_id, provider_name)
-
                 if self._new_window_callback:
                     event = NewWindowEvent(
                         window_id=window_id,
@@ -400,9 +410,10 @@ class SessionMonitor:
         poll until it succeeds. ``handle_new_window`` is idempotent — it skips
         windows that are already bound — so this generates no spam for bound tabs.
 
-        ``live_window_ids`` is the set from ``list_windows``. Because ``list_windows``
-        already filters ``__*__`` workspace/tab labels, any such tab is absent from
-        ``live_window_ids`` and is silently skipped here as well.
+        ``live_window_ids`` is the caller-filtered discovery id set (non-internal
+        windows from the current listing). Because it already excludes internal
+        ``__*__``/``fm-*`` labels, any such tab is absent from ``live_window_ids``
+        and is silently skipped here as well.
         """
         if not self._new_window_callback:
             return
@@ -451,22 +462,18 @@ class SessionMonitor:
                 await session_map_sync.load_session_map(raw_session_map)
 
                 all_windows = await list_windows_for_reconciliation(tmux_manager)
-                discovery_windows = (
-                    None
-                    if all_windows is None
-                    else [w for w in all_windows if not w.internal]
-                )
-                current_map = await self._detect_and_cleanup_changes(
-                    raw_session_map,
-                    discovery_windows=[] if all_windows is None else discovery_windows,
-                )
-
                 if all_windows is None:
+                    current_map = await self._detect_and_cleanup_changes(
+                        raw_session_map, discovery_windows=[]
+                    )
                     logger.warning(
                         "Multiplexer listing unavailable; skipping window reconciliation"
                     )
                 else:
-                    assert discovery_windows is not None
+                    discovery_windows = [w for w in all_windows if not w.internal]
+                    current_map = await self._detect_and_cleanup_changes(
+                        raw_session_map, discovery_windows=discovery_windows
+                    )
                     live_window_ids = {w.window_id for w in all_windows}
                     session_map_sync.prune_session_map(live_window_ids)
                     known_window_ids = set(current_map.keys())
