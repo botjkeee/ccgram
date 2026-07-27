@@ -20,6 +20,7 @@ from ....providers import get_provider_for_window
 from ....providers.base import StatusUpdate
 from ....session_monitor import get_active_monitor
 from ....multiplexer import agent_status_cache
+from ....multiplexer import foreground_cache
 from ....multiplexer import multiplexer as tmux_manager
 from ....multiplexer.vim_state import has_insert_indicator, notify_vim_insert_seen
 from ..polling_state import terminal_poll_state, terminal_screen_buffer
@@ -143,14 +144,23 @@ async def effective_window(window_id: str, w: "TmuxWindow") -> "TmuxWindow":
     label and goes empty when the agent exits — unlike tmux, which reports the
     shell. Shell-exit detection (``is_shell_prompt``) and provider re-detection
     both key off this field, so resolve the foreground once when it is empty.
+
+    The native field stays empty in that steady state (agent exited, bare
+    shell left running), so without a memo this would re-fork ``foreground``
+    every poll tick forever. ``foreground_cache`` bounds that to once per TTL
+    window; the tmux gate above short-circuits first, so tmux never touches it.
     """
     if w.pane_current_command or not tmux_manager.capabilities.native_agent_status:
         return w
+    warm, cached_cmd = foreground_cache.lookup(window_id)
+    if warm:
+        return replace(w, pane_current_command=cached_cmd) if cached_cmd else w
     fg = await tmux_manager.foreground(window_id)
     cmd = ""
     if fg and fg.argv:
         # lstrip("-"): login shells report argv0 "-zsh" (cf. shell_infra.py:170).
         cmd = fg.argv[0].rsplit("/", 1)[-1].lstrip("-")
+    foreground_cache.set_command(window_id, cmd)
     if not cmd:
         return w
     return replace(w, pane_current_command=cmd)

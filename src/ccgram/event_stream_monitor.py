@@ -28,6 +28,7 @@ from collections.abc import Callable
 import structlog
 
 from .multiplexer import agent_status_cache
+from .multiplexer import foreground_cache
 from .multiplexer import multiplexer as mux
 from .multiplexer.base import MuxEvent
 from .telegram_client import TelegramClient, unwrap_bot
@@ -119,6 +120,7 @@ class EventStreamMonitor:
             agent_status_cache.set_status(event.window_id, event.status)
         elif event.kind == "window_died":
             agent_status_cache.clear(event.window_id)
+            foreground_cache.clear(event.window_id)
             await self._notify_dead(event.window_id)
 
     async def _notify_dead(self, window_id: str) -> None:

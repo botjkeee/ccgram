@@ -17,7 +17,7 @@ import pytest
 from ccgram.handlers.polling.window_tick import observe
 from ccgram.handlers.polling.window_tick.observe import _native_agent_status
 from ccgram.handlers.polling.polling_types import is_shell_prompt
-from ccgram.multiplexer import agent_status_cache
+from ccgram.multiplexer import agent_status_cache, foreground_cache
 from ccgram.multiplexer.base import AgentStatus, ForegroundInfo, WindowRef
 
 
@@ -26,8 +26,10 @@ def _clear_status_cache():
     # The push-status cache is a process-global; isolate every test so the
     # subprocess-fallback tests see a cold cache regardless of run order.
     agent_status_cache.reset()
+    foreground_cache.reset()
     yield
     agent_status_cache.reset()
+    foreground_cache.reset()
 
 
 def _fake_mux(native: bool, status: AgentStatus | None) -> MagicMock:
@@ -138,11 +140,15 @@ async def test_cold_cache_falls_back_to_subprocess() -> None:
 class _FakeMux:
     """Minimal multiplexer double (native_agent_status backend)."""
 
-    def __init__(self, fg_argv: list[str] | None):
-        self.capabilities = _herdr_like_caps()
+    def __init__(self, fg_argv: list[str] | None, *, native: bool = True):
+        self.capabilities = (
+            _herdr_like_caps() if native else SimpleNamespace(native_agent_status=False)
+        )
         self._fg_argv = fg_argv
+        self.foreground_calls = 0
 
     async def foreground(self, window_id: str):
+        self.foreground_calls += 1
         if self._fg_argv is None:
             return None
         return ForegroundInfo(pid=1, pgid=1, argv=self._fg_argv, cwd="/x", tty="")
@@ -176,3 +182,69 @@ async def test_effective_window_keeps_agent_label(monkeypatch) -> None:
     )
     monkeypatch.setattr(observe, "tmux_manager", _FakeMux(None))
     assert (await observe.effective_window("w2:t1", w)) is w
+
+
+# ── Finding 3: foreground_cache memo bounds per-tick subprocess churn ──────
+
+
+async def test_effective_window_memoizes_foreground_within_ttl(monkeypatch) -> None:
+    """A second call inside the TTL must not re-fork ``foreground()``."""
+    w = WindowRef(
+        window_id="w2:t1", window_name="app", cwd="/x", pane_current_command=""
+    )
+    fake = _FakeMux(["/bin/zsh"])
+    monkeypatch.setattr(observe, "tmux_manager", fake)
+
+    first = await observe.effective_window("w2:t1", w)
+    second = await observe.effective_window("w2:t1", w)
+
+    assert first.pane_current_command == "zsh"
+    assert second.pane_current_command == "zsh"
+    assert fake.foreground_calls == 1  # memo served the second tick
+
+
+async def test_effective_window_memo_expires(monkeypatch) -> None:
+    """Once the memo's TTL elapses, ``foreground()`` is called again."""
+    w = WindowRef(
+        window_id="w2:t1", window_name="app", cwd="/x", pane_current_command=""
+    )
+    fake = _FakeMux(["/bin/zsh"])
+    monkeypatch.setattr(observe, "tmux_manager", fake)
+
+    await observe.effective_window("w2:t1", w)
+    assert fake.foreground_calls == 1
+
+    monkeypatch.setattr(foreground_cache, "_TTL_SECONDS", -1.0)  # force expiry
+    await observe.effective_window("w2:t1", w)
+    assert fake.foreground_calls == 2  # memo expired -> re-resolved
+
+
+async def test_effective_window_memoizes_empty_resolution(monkeypatch) -> None:
+    """A steady-state 'nothing to resolve' result is memoized too."""
+    w = WindowRef(
+        window_id="w2:t1", window_name="app", cwd="/x", pane_current_command=""
+    )
+    fake = _FakeMux(None)  # foreground() finds no process
+    monkeypatch.setattr(observe, "tmux_manager", fake)
+
+    first = await observe.effective_window("w2:t1", w)
+    second = await observe.effective_window("w2:t1", w)
+
+    assert first is w
+    assert second is w
+    assert fake.foreground_calls == 1
+
+
+async def test_effective_window_tmux_never_touches_memo(monkeypatch) -> None:
+    """tmux (no native_agent_status) must short-circuit before any memo lookup."""
+    w = WindowRef(
+        window_id="w2:t1", window_name="app", cwd="/x", pane_current_command=""
+    )
+    fake = _FakeMux(["/bin/zsh"], native=False)
+    monkeypatch.setattr(observe, "tmux_manager", fake)
+
+    out = await observe.effective_window("w2:t1", w)
+
+    assert out is w  # unchanged: tmux gate short-circuits first
+    assert fake.foreground_calls == 0
+    assert foreground_cache.lookup("w2:t1") == (False, "")  # never written
