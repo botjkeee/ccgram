@@ -45,27 +45,29 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-def _transcript_for_session_id(session_id: str, cwd: str) -> "Path | None":
-    """Resolve a bare session id to its transcript file, or None.
+def _transcript_for_session_id(agent: str, session_id: str, cwd: str) -> "Path | None":
+    """Resolve a session id via the provider that owns *agent*'s storage layout.
 
-    Mirrors ``SessionResolver._build_session_file_path`` (cwd encoded with
-    ``/`` → ``-``) and falls back to a glob when the window's recorded cwd has
-    drifted from the one the transcript was filed under.
+    Every provider files transcripts differently (Claude under
+    ``~/.claude/projects``, Codex under ``~/.codex/sessions``), so the layout
+    lives in the provider, not here. An agent this build has no provider for
+    resolves nothing rather than being guessed at with another layout.
     """
-    # Lazy: config pulls the env/.env layer; this module is imported by the
-    # polling graph, which must stay import-light.
-    from ...config import config
-
-    if not session_id:
+    if not agent or not session_id:
         return None
-    if cwd:
-        direct = (
-            config.claude_projects_path / cwd.replace("/", "-") / f"{session_id}.jsonl"
-        )
-        if direct.exists():
-            return direct
-    matches = list(config.claude_projects_path.glob(f"*/{session_id}.jsonl"))
-    return matches[0] if matches else None
+    provider = get_provider_for_window("", agent)
+    if provider.capabilities.name != agent:
+        # get_provider_for_window degrades an unknown name to the config
+        # default; resolving a foreign id against that provider's layout could
+        # only produce a wrong answer.
+        return None
+    resolved = provider.transcript_for_session_id(session_id, cwd)
+    if not resolved:
+        return None
+    # Lazy: keep pathlib next to its only use, matching this module's shape.
+    from pathlib import Path
+
+    return Path(resolved)
 
 
 async def _native_session_transcript(
@@ -88,7 +90,7 @@ async def _native_session_transcript(
     if ref.kind == "path":
         path = Path(ref.value)
     else:
-        path = _transcript_for_session_id(ref.value, cwd)
+        path = _transcript_for_session_id(ref.agent, ref.value, cwd)
     if path is None or not path.exists():
         return None
     # Transcript stems are either the bare session id (claude) or

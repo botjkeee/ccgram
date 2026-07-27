@@ -235,6 +235,15 @@ class JsonlProvider:
     ) -> SessionStartEvent | None:
         return None
 
+    def transcript_for_session_id(
+        self,
+        session_id: str,  # noqa: ARG002 — protocol signature
+        cwd: str,  # noqa: ARG002 — protocol signature
+    ) -> str | None:
+        # Providers that do not address sessions by id (or report a full path
+        # instead, like Pi) resolve nothing here.
+        return None
+
     def discover_commands(
         self,
         base_dir: str,  # noqa: ARG002 — protocol signature

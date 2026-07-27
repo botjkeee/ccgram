@@ -260,6 +260,21 @@ class AgentProvider(Protocol):
         """
         ...
 
+    def transcript_for_session_id(self, session_id: str, cwd: str) -> str | None:
+        """Resolve one of this provider's session ids to its transcript file.
+
+        The inverse of ``discover_transcript``: the caller already knows *which*
+        session is live (the multiplexer reports it) and needs the file it is
+        written to. Each provider owns its own storage layout — Claude files
+        transcripts under ``~/.claude/projects/<cwd-with-dashes>/<id>.jsonl``,
+        Codex under ``~/.codex/sessions/YYYY/MM/DD/<name>-<ts>-<id>.jsonl``.
+
+        ``cwd`` is a hint only: implementations must still find the transcript
+        when the window's recorded cwd has drifted. Returns None when the
+        provider does not address sessions by id, or the file is not on disk.
+        """
+        ...
+
     def requires_pane_title_for_detection(self, pane_current_command: str) -> bool:
         """Whether provider detection requires pane title for given command."""
         ...

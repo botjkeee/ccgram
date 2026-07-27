@@ -733,6 +733,28 @@ class CodexProvider(JsonlProvider):
             )
         return None
 
+    def transcript_for_session_id(
+        self,
+        session_id: str,
+        cwd: str,  # noqa: ARG002 — the id is globally unique; cwd adds nothing
+    ) -> str | None:
+        """Resolve a Codex session id under ``~/.codex/sessions/``.
+
+        Codex files a session as ``YYYY/MM/DD/<name>-<ts>-<uuid>.jsonl``, so the
+        id is a filename *suffix* rather than the stem, and the date directory
+        is unknown to the caller — hence the recursive suffix match. Codex also
+        rotates to a new session id (and file) mid-pane, which is exactly when
+        this lookup is needed: the recorded transcript has gone stale while the
+        multiplexer already reports the live id.
+        """
+        if not session_id:
+            return None
+        sessions_dir = Path.home() / ".codex" / "sessions"
+        if not sessions_dir.is_dir():
+            return None
+        matches = sorted(sessions_dir.rglob(f"*{session_id}.jsonl"))
+        return str(matches[0]) if matches else None
+
     def discover_transcript(
         self,
         cwd: str,

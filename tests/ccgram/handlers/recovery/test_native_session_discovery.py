@@ -116,6 +116,56 @@ async def test_id_kind_glob_fallback_when_cwd_drifted(monkeypatch, tmp_path) -> 
     assert native == (transcript, "sid-1")
 
 
+async def test_id_kind_routes_to_the_reported_agents_layout(
+    monkeypatch, tmp_path
+) -> None:
+    """A codex session id must resolve under ~/.codex/sessions, not Claude's tree.
+
+    Regression: resolution used to hardcode Claude's layout, so herdr's live
+    codex session id resolved to nothing and discovery silently fell back to
+    the hook's transcript_path — which is exactly what goes stale when codex
+    rotates to a new session id mid-pane. The topic then tailed a dead file at
+    EOF and no messages ever arrived.
+    """
+    sid = "019fa2c7-db03-73b1-ad98-2fc2a41acf8d"
+    day = tmp_path / ".codex" / "sessions" / "2026" / "07" / "27"
+    day.mkdir(parents=True)
+    rollout = day / f"rollout-2026-07-27T08-53-54-{sid}.jsonl"
+    rollout.write_text("{}\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    # Claude's tree is isolated and empty: a resolution that lands here proves
+    # the codex layout was consulted, not Claude's.
+    monkeypatch.setattr(config, "claude_projects_path", tmp_path / "claude-empty")
+    _stub_native_session(
+        monkeypatch, AgentSessionRef(kind="id", value=sid, agent="codex")
+    )
+
+    native = await transcript_discovery._native_session_transcript(
+        "w1W:t1", "/home/ffs/projects/transcrip-audio-video"
+    )
+
+    assert native == (rollout, sid)
+
+
+async def test_id_kind_unknown_agent_resolves_nothing(monkeypatch, tmp_path) -> None:
+    """An agent this build has no provider for must not borrow another layout."""
+    projects = tmp_path / "projects"
+    (projects / "-home-u-proj").mkdir(parents=True)
+    # A file that Claude's layout WOULD match, to prove the default provider is
+    # not silently used for a foreign agent's id.
+    (projects / "-home-u-proj" / "sid-1.jsonl").write_text("{}\n")
+    monkeypatch.setattr(config, "claude_projects_path", projects)
+    _stub_native_session(
+        monkeypatch, AgentSessionRef(kind="id", value="sid-1", agent="amp")
+    )
+
+    native = await transcript_discovery._native_session_transcript(
+        "w2:t1", "/home/u/proj"
+    )
+
+    assert native is None
+
+
 async def test_missing_transcript_falls_through(monkeypatch, tmp_path) -> None:
     # Isolate the projects path too — otherwise the glob reads the REAL
     # ~/.claude/projects of the machine running the suite.
