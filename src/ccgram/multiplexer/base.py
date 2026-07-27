@@ -154,7 +154,12 @@ class MuxEvent:
     - ``"agent_status"`` — the pane's native agent run-state changed; ``status``
       carries the new ``AgentStatus``. ``status=None`` means "no agent present
       in the watched pane" (a negative marker, not "unknown") — reprime emits
-      it for a subscribed pane with no live agent.
+      it for a subscribed pane it read successfully and that runs no agent.
+    - ``"agent_status_unknown"`` — the backend could not determine the window's
+      agent state (the pane read failed, or the window resolved no pane).
+      Consumers must evict any cached status rather than record a negative
+      marker: unknown is not "no agent", and treating it as one would suppress
+      the poll layer's own fallback lookup for the rest of the connection.
     - ``"window_died"`` — the window's agent process exited or the window/tab
       closed (``pane.exited`` / ``tab.closed`` on herdr).
     """

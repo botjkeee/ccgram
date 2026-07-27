@@ -28,6 +28,23 @@ async def test_dispatch_none_status_writes_negative_marker() -> None:
     assert agent_status_cache.lookup("w2:t1") == (True, None)  # warm negative, NOT cold
 
 
+async def test_dispatch_unknown_status_evicts_instead_of_marking() -> None:
+    """An unreadable pane must go cold, so the poll layer's fallback still runs.
+
+    Regression: reprime reported an unreadable/unresolved pane as
+    ``status=None``, indistinguishable from a genuinely agentless one, and the
+    resulting warm-negative marker suppressed ``_native_agent_status``'s
+    subprocess fallback until the stream restarted.
+    """
+    agent_status_cache.reset()
+    agent_status_cache.set_status("w2:t1", AgentStatus("working", "claude", ""))
+    monitor = EventStreamMonitor(MagicMock(), lambda: {"w2:t1"})
+
+    await monitor._dispatch(MuxEvent("agent_status_unknown", "w2:t1", "w2:p1"))
+
+    assert agent_status_cache.lookup("w2:t1") == (False, None)  # cold, NOT negative
+
+
 async def test_dispatch_window_died_clears_cache_and_notifies_bound_users() -> None:
     agent_status_cache.reset()
     agent_status_cache.set_status("w2:t1", AgentStatus("working"))

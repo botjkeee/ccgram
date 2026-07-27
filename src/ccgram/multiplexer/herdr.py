@@ -1189,22 +1189,35 @@ class HerdrManager:
                         primed: set[str] = set()
                         for pane_id, window_id in pane_to_window.items():
                             primed.add(window_id)
-                            # status=None is the negative marker: the agent left
-                            # while the stream was down; a stale cached "working"
+                            pane = await self._pane_get(pane_id)
+                            if pane is None:
+                                # The read failed (timeout, socket hiccup) — the
+                                # agent state is unknown, not absent. Evicting
+                                # keeps the consumer's fallback lookup alive.
+                                yield MuxEvent(
+                                    kind="agent_status_unknown",
+                                    window_id=window_id,
+                                    pane_id=pane_id,
+                                )
+                                continue
+                            # status=None is the negative marker: the pane was
+                            # read and runs no agent, so a stale cached "working"
                             # must not outlive the reconnect.
                             yield MuxEvent(
                                 kind="agent_status",
                                 window_id=window_id,
                                 pane_id=pane_id,
-                                status=_status_from_pane(await self._pane_get(pane_id)),
+                                status=_status_from_pane(pane),
                             )
                         for window_id in ids:
                             if window_id not in primed:
+                                # No pane resolved (tab gone, or ``pane list``
+                                # failed) and nothing to subscribe to, so no push
+                                # can correct this window: evict, never mark.
                                 yield MuxEvent(
-                                    kind="agent_status",
+                                    kind="agent_status_unknown",
                                     window_id=window_id,
                                     pane_id="",
-                                    status=None,
                                 )
                         continue
                     event = translate_event(obj, pane_to_window)

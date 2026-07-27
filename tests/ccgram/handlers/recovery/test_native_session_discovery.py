@@ -147,6 +147,96 @@ async def test_id_kind_routes_to_the_reported_agents_layout(
     assert native == (rollout, sid)
 
 
+async def test_id_kind_accepts_suffixed_agent_label(monkeypatch, tmp_path) -> None:
+    """A suffixed agent label ("claude-code") is the same provider's layout.
+
+    herdr reports a display label, not a bare provider name — the same suffixed
+    forms that reach ``pane_current_command``. Strict equality used to reject
+    them, so discovery silently fell back to the hook's stale transcript_path.
+    """
+    projects = tmp_path / "projects"
+    (projects / "-home-u-proj").mkdir(parents=True)
+    transcript = projects / "-home-u-proj" / "sid-1.jsonl"
+    transcript.write_text("{}\n")
+    monkeypatch.setattr(config, "claude_projects_path", projects)
+    _stub_native_session(
+        monkeypatch, AgentSessionRef(kind="id", value="sid-1", agent="claude-code")
+    )
+
+    native = await transcript_discovery._native_session_transcript(
+        "w2:t1", "/home/u/proj"
+    )
+
+    assert native == (transcript, "sid-1")
+
+
+async def test_id_kind_empty_agent_uses_recorded_provider(
+    monkeypatch, tmp_path
+) -> None:
+    """An unnamed agent falls back to the window's recorded provider.
+
+    ``AgentSessionRef.agent`` defaults to "" whenever the backend's payload
+    omits the field; the session id is still good, so the window's own provider
+    resolves it rather than discovery giving up.
+    """
+    sid = "019fa2c7-db03-73b1-ad98-2fc2a41acf8d"
+    day = tmp_path / ".codex" / "sessions" / "2026" / "07" / "27"
+    day.mkdir(parents=True)
+    rollout = day / f"rollout-2026-07-27T08-53-54-{sid}.jsonl"
+    rollout.write_text("{}\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(config, "claude_projects_path", tmp_path / "claude-empty")
+    _stub_native_session(monkeypatch, AgentSessionRef(kind="id", value=sid, agent=""))
+
+    native = await transcript_discovery._native_session_transcript(
+        "w1W:t1", "/home/u/proj", "codex"
+    )
+
+    assert native == (rollout, sid)
+
+
+async def test_id_kind_empty_agent_without_recorded_provider_resolves_nothing(
+    monkeypatch, tmp_path
+) -> None:
+    """No agent label and no recorded provider leaves nothing to resolve against."""
+    projects = tmp_path / "projects"
+    (projects / "-home-u-proj").mkdir(parents=True)
+    (projects / "-home-u-proj" / "sid-1.jsonl").write_text("{}\n")
+    monkeypatch.setattr(config, "claude_projects_path", projects)
+    _stub_native_session(
+        monkeypatch, AgentSessionRef(kind="id", value="sid-1", agent="")
+    )
+
+    native = await transcript_discovery._native_session_transcript(
+        "w2:t1", "/home/u/proj"
+    )
+
+    assert native is None
+
+
+async def test_id_kind_unknown_agent_ignores_recorded_provider(
+    monkeypatch, tmp_path
+) -> None:
+    """A named foreign agent is not resolved against the window's provider.
+
+    The recorded provider is a fallback for a *missing* label only — a label
+    that names another vendor's agent must still resolve nothing.
+    """
+    projects = tmp_path / "projects"
+    (projects / "-home-u-proj").mkdir(parents=True)
+    (projects / "-home-u-proj" / "sid-1.jsonl").write_text("{}\n")
+    monkeypatch.setattr(config, "claude_projects_path", projects)
+    _stub_native_session(
+        monkeypatch, AgentSessionRef(kind="id", value="sid-1", agent="amp")
+    )
+
+    native = await transcript_discovery._native_session_transcript(
+        "w2:t1", "/home/u/proj", "claude"
+    )
+
+    assert native is None
+
+
 async def test_id_kind_unknown_agent_resolves_nothing(monkeypatch, tmp_path) -> None:
     """An agent this build has no provider for must not borrow another layout."""
     projects = tmp_path / "projects"

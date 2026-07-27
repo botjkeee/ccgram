@@ -1993,7 +1993,13 @@ async def test_watch_events_reprime_yields_none_status_for_agentless_pane() -> N
 
 
 async def test_watch_events_reprime_sweeps_watched_window_with_no_pane() -> None:
-    """A watched tab that resolves no pane still gets one reprime event."""
+    """A watched tab that resolves no pane is swept as unknown, not agentless.
+
+    Regression: the sweep used to emit the ``status=None`` negative marker,
+    which the consumer records as "no agent" — a warm entry that suppresses the
+    poll layer's own lookup. Such a window is subscribed to nothing, so no push
+    can ever correct it; the state is unknown and must evict instead.
+    """
     pane_list_empty = json.dumps({"result": {"panes": []}})
     opener = _stream_of([])
     fake = FakeHerdr().on("pane", "list", out=pane_list_empty)
@@ -2004,7 +2010,31 @@ async def test_watch_events_reprime_sweeps_watched_window_with_no_pane() -> None
         got.append(event)
         break
 
-    assert got == [MuxEvent("agent_status", "w2:t1", "", None)]
+    assert got == [MuxEvent("agent_status_unknown", "w2:t1", "", None)]
+
+
+async def test_watch_events_reprime_failed_pane_read_is_unknown_not_agentless() -> None:
+    """A failed ``pane get`` during reprime must not claim "no agent".
+
+    Regression: ``_status_from_pane(None)`` is None for both a genuinely
+    agentless pane and an unreadable one, so a single transient read failure on
+    reconnect used to pin the warm-negative marker for the whole connection
+    while the agent was mid-run.
+    """
+    opener = _stream_of([])
+    fake = (
+        FakeHerdr()
+        .on("pane", "list", out=PANE_LIST_SINGLE)
+        .on("pane", "get", rc=1, err="herdr: transient failure")
+    )
+    mgr = HerdrManager(socket_path="/tmp/s.sock", runner=fake, stream_opener=opener)
+
+    got: list[MuxEvent] = []
+    async for event in mgr.watch_events(["w2:t1"]):
+        got.append(event)
+        break
+
+    assert got == [MuxEvent("agent_status_unknown", "w2:t1", "w2:p1", None)]
 
 
 async def test_watch_events_reprime_reads_subscribed_pane_not_refocused_one() -> None:
