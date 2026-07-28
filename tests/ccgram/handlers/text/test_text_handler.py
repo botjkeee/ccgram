@@ -240,6 +240,7 @@ class TestHandleDeadWindow:
         self, mock_tm: MagicMock
     ) -> None:
         lifecycle_strategy.start_autoclose_timer(100, 42, "dead", 100.0)
+        lifecycle_strategy.mark_dead_notified(100, 42, "@0")
         mock_tm.find_window_by_id = AsyncMock(return_value=MagicMock())
         message = AsyncMock()
 
@@ -247,6 +248,7 @@ class TestHandleDeadWindow:
 
         assert result is False
         assert lifecycle_strategy.get_state(100, 42).autoclose is None
+        assert not lifecycle_strategy.is_dead_notified(100, 42, "@0")
 
     @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
     @patch(f"{_TH}.render_banner")

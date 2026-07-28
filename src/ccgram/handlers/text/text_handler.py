@@ -335,6 +335,7 @@ async def _handle_dead_window(
     w = await tmux_manager.find_window_by_id(window_id)
     if w:
         lifecycle_strategy.clear_autoclose_timer(user_id, thread_id)
+        lifecycle_strategy.clear_dead_notification(user_id, thread_id)
         return False
 
     display = thread_router.get_display_name(window_id)
