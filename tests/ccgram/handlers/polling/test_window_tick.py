@@ -14,6 +14,7 @@ from ccgram.handlers.polling.polling_state import (
     terminal_screen_buffer,
 )
 from ccgram.handlers.polling.polling_types import TickContext
+from ccgram.handlers.topics.topic_lifecycle import check_autoclose_timers
 from ccgram.handlers.polling.window_tick import (
     _check_interactive_only,
     _handle_dead_window_notification,
@@ -523,6 +524,90 @@ class TestDeadWindowNotification:
             mock_send.reset_mock()
             await _handle_dead_window_notification(bot, 1, 100, "@0")
             mock_send.assert_not_called()
+
+    async def test_live_revalidation_allows_later_real_death_cleanup(self):
+        bot = AsyncMock(spec=Bot)
+        user_id, thread_id, window_id = 1, 100, "@0"
+
+        with (
+            patch(
+                "ccgram.handlers.polling.window_tick.apply.thread_router"
+            ) as apply_router,
+            patch(
+                "ccgram.handlers.polling.window_tick.apply.window_query"
+            ) as window_query,
+            patch(
+                "ccgram.handlers.polling.window_tick.apply.update_topic_emoji",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ccgram.handlers.polling.window_tick.apply.clear_tool_msg_ids_for_topic"
+            ),
+            patch(
+                "ccgram.handlers.polling.window_tick.apply.rate_limit_send_message",
+                new_callable=AsyncMock,
+            ) as send_message,
+            patch("ccgram.handlers.topics.topic_lifecycle.config") as config,
+            patch(
+                "ccgram.handlers.topics.topic_lifecycle.thread_router"
+            ) as lifecycle_router,
+            patch(
+                "ccgram.handlers.topics.topic_lifecycle.tmux_manager"
+            ) as tmux_manager,
+            patch(
+                "ccgram.handlers.topics.topic_lifecycle.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as clear_topic_state,
+            patch(
+                "ccgram.handlers.topics.topic_lifecycle.time.monotonic",
+                side_effect=[0.0, 61.0, 120.0, 181.0, 182.0],
+            ),
+        ):
+            apply_router.resolve_chat_id.return_value = 42
+            apply_router.get_display_name.return_value = "test"
+            window_query.view_window.return_value = None
+            send_message.return_value = MagicMock()
+            config.autoclose_dead_minutes = 1
+            config.autoclose_done_minutes = 1
+            lifecycle_router.get_window_for_thread.return_value = window_id
+            lifecycle_router.resolve_chat_id.return_value = 42
+            tmux_manager.find_window_by_id = AsyncMock(side_effect=[MagicMock(), None])
+
+            await tick_window(bot, user_id, thread_id, window_id, None)
+            await tick_window(bot, user_id, thread_id, window_id, None)
+            send_message.assert_awaited_once()
+
+            await check_autoclose_timers(bot)
+            assert not lifecycle_strategy.is_dead_notified(
+                user_id, thread_id, window_id
+            )
+            assert lifecycle_strategy.get_state(user_id, thread_id).autoclose is None
+
+            await tick_window(bot, user_id, thread_id, window_id, None)
+            assert lifecycle_strategy.is_dead_notified(user_id, thread_id, window_id)
+            assert lifecycle_strategy.get_state(user_id, thread_id).autoclose == (
+                "dead",
+                120.0,
+            )
+
+            await tick_window(bot, user_id, thread_id, window_id, None)
+            assert send_message.await_count == 2
+
+            await check_autoclose_timers(bot)
+            await check_autoclose_timers(bot)
+
+        assert send_message.await_count == 2
+        bot.delete_forum_topic.assert_awaited_once_with(
+            chat_id=42, message_thread_id=thread_id
+        )
+        clear_topic_state.assert_awaited_once_with(
+            user_id,
+            thread_id,
+            client=bot,
+            window_id=window_id,
+            window_dead=True,
+        )
+        lifecycle_router.unbind_thread.assert_called_once_with(user_id, thread_id)
 
 
 class TestContractTests:

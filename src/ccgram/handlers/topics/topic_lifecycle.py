@@ -74,6 +74,7 @@ async def _close_expired_topic(
         live_window = await tmux_manager.find_window_by_id(window_id)
         if live_window is not None:
             lifecycle_strategy.clear_autoclose_timer(user_id, thread_id)
+            lifecycle_strategy.clear_dead_notification(user_id, thread_id)
             logger.info(
                 "stale_dead_autoclose_cleared",
                 thread_id=thread_id,

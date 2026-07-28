@@ -76,6 +76,7 @@ class TestCheckAutocloseTimers:
         lifecycle_strategy.start_autoclose_timer(
             user_id, thread_id, "dead", time.monotonic() - 99999
         )
+        lifecycle_strategy.mark_dead_notified(user_id, thread_id, "@0")
         with (
             patch("ccgram.handlers.topics.topic_lifecycle.config") as mock_config,
             patch(
@@ -90,6 +91,7 @@ class TestCheckAutocloseTimers:
             await check_autoclose_timers(bot)
         bot.delete_forum_topic.assert_not_called()
         assert lifecycle_strategy.get_state(user_id, thread_id).autoclose is None
+        assert not lifecycle_strategy.is_dead_notified(user_id, thread_id, "@0")
 
 
 def _window_view(origin: str) -> WindowView:
