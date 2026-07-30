@@ -92,16 +92,29 @@ async def test_get_recent_messages_preserves_byte_ranges(tmp_path, monkeypatch) 
         lambda _window_id: "claude",
     )
 
-    start_byte = len(lines[0].encode())
-    end_byte = start_byte + len(lines[1].encode())
-    messages, total = await resolver.get_recent_messages(
-        "@1",
-        start_byte=start_byte,
-        end_byte=end_byte,
-    )
+    second_start = len(lines[0].encode())
+    third_start = second_start + len(lines[1].encode())
+    after_end = third_start + len(lines[2].encode()) + 1
+    cases = [
+        (0, None, ["first — unicode", "second", "third"]),
+        (0, 0, []),
+        (0, 1, ["first — unicode"]),
+        (second_start, second_start, []),
+        (second_start, third_start, ["second"]),
+        (second_start, third_start + 1, ["second", "third"]),
+        (1, None, ["second", "third"]),
+        (after_end, None, []),
+    ]
 
-    assert total == 1
-    assert [message["text"] for message in messages] == ["second"]
+    for start_byte, end_byte, expected_texts in cases:
+        messages, total = await resolver.get_recent_messages(
+            "@1",
+            start_byte=start_byte,
+            end_byte=end_byte,
+        )
+
+        assert total == len(expected_texts)
+        assert [message["text"] for message in messages] == expected_texts
 
 
 async def test_get_recent_messages_stops_worker_after_cancellation(
