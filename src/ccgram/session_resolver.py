@@ -15,6 +15,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import structlog
 from dataclasses import dataclass
@@ -30,6 +31,32 @@ from .window_state_ports import identity_state
 from .window_state_store import window_store
 
 logger = structlog.get_logger()
+
+
+def _read_transcript_entries(
+    file_path: Path,
+    provider: Any,
+    start_byte: int,
+    end_byte: int | None,
+) -> list[dict[str, Any]]:
+    """Read and parse a transcript in one worker-thread operation."""
+    entries: list[dict[str, Any]] = []
+    with file_path.open("r", encoding="utf-8") as file:
+        if start_byte > 0:
+            file.seek(start_byte)
+
+        while True:
+            if end_byte is not None and file.tell() >= end_byte:
+                break
+
+            line = file.readline()
+            if not line:
+                break
+
+            data = provider.parse_transcript_line(line)
+            if data:
+                entries.append(data)
+    return entries
 
 
 @dataclass
@@ -238,25 +265,14 @@ class SessionResolver:
         provider = get_provider_for_window(
             window_id, provider_name=identity_state.get_provider_name(window_id)
         )
-        entries: list[dict[str, Any]] = []
         try:
-            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-                if start_byte > 0:
-                    await f.seek(start_byte)
-
-                while True:
-                    if end_byte is not None:
-                        current_pos = await f.tell()
-                        if current_pos >= end_byte:
-                            break
-
-                    line = await f.readline()
-                    if not line:
-                        break
-
-                    data = provider.parse_transcript_line(line)
-                    if data:
-                        entries.append(data)
+            entries = await asyncio.to_thread(
+                _read_transcript_entries,
+                file_path,
+                provider,
+                start_byte,
+                end_byte,
+            )
         except OSError:
             logger.exception("Error reading session file %s", file_path)
             return [], 0
