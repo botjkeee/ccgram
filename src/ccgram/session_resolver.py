@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import structlog
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ def _read_transcript_entries(
     provider: Any,
     start_byte: int,
     end_byte: int | None,
+    stop_reading: threading.Event,
 ) -> list[dict[str, Any]]:
     """Read and parse a transcript in one worker-thread operation."""
     entries: list[dict[str, Any]] = []
@@ -46,6 +48,8 @@ def _read_transcript_entries(
             file.seek(start_byte)
 
         while True:
+            if stop_reading.is_set():
+                break
             if end_byte is not None and file.tell() >= end_byte:
                 break
 
@@ -265,6 +269,7 @@ class SessionResolver:
         provider = get_provider_for_window(
             window_id, provider_name=identity_state.get_provider_name(window_id)
         )
+        stop_reading = threading.Event()
         try:
             entries = await asyncio.to_thread(
                 _read_transcript_entries,
@@ -272,10 +277,13 @@ class SessionResolver:
                 provider,
                 start_byte,
                 end_byte,
+                stop_reading,
             )
         except OSError:
             logger.exception("Error reading session file %s", file_path)
             return [], 0
+        finally:
+            stop_reading.set()
 
         agent_messages, _ = provider.parse_transcript_entries(entries, {})
         all_messages = [
